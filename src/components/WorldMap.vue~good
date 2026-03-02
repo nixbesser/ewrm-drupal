@@ -1,0 +1,717 @@
+<template>
+  <div class="wrap">
+    <div ref="mapEl" class="map"></div>
+
+    <canvas ref="gridCanvasEl" class="grid-canvas"></canvas>
+
+    <div ref="anchorLayerEl" class="anchor-layer">
+      <div
+        v-for="t in anchors"
+        :key="`${t.x}:${t.y}`"
+        class="tile-shell"
+        :class="{ 'is-active': isActive(t) }"
+        :style="tileStyle(t)"
+        @click.stop="onTileClick(t)"
+      >
+        <TileAnchor :tile="t" :flipped="isFlipped(t)" />
+      </div>
+    </div>
+
+    <div class="hud">
+      <div><strong>EWRM HUD</strong></div>
+      <div>route: {{ hud.route }}</div>
+      <div>tileBounds: {{ hud.tb }}</div>
+      <div>centerTile: {{ hud.ct }}</div>
+      <div>anchors: {{ anchors.length }}</div>
+      <div>pendingNavSource: {{ hud.nav }}</div>
+      <div>lastErr: {{ hud.err }}</div>
+      <div>infra: {{ infraTiles.length }}</div>
+
+    </div>
+  </div>
+</template>
+
+<script setup>
+import L from 'leaflet'
+import { ref, onMounted, onBeforeUnmount, watch, reactive } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { fetchViewport, fetchCell, resolveObject } from '../api/worldApi'
+import TileAnchor from './TileAnchor.vue'
+
+const WORLD = { z: 10, cols: 1024, rows: 1024, cellPx: 256, pad: 2 }
+const BACKEND_Y_IS_BOTTOM_ORIGIN = false
+
+const mapEl = ref(null)
+const gridCanvasEl = ref(null)
+const anchorLayerEl = ref(null)
+
+const anchors = ref([])
+const anchorLayerPos = new Map()
+
+let map = null
+let ctx = null
+let raf = 0
+let viewportAbort = null
+
+const route = useRoute()
+const router = useRouter()
+
+const flippedKey = ref(null)
+const infraTiles = ref([]) // [{x,y,role}]
+
+// Deep links should center; click-open should NOT.
+let hasInitialized = false
+
+let didMoveSinceDown = false
+
+/**
+ * This is the key change:
+ * - We set pendingNavSource = 'click' right before router.push from any in-map interaction.
+ * - The next route pipeline consumes it and DOES NOT center.
+ * - Then we clear it.
+ *
+ * This avoids timing races with watch() / microtasks.
+ */
+let pendingNavSource = null // 'click' | null
+
+const hud = reactive({
+  tb: '—',
+  ct: '—',
+  route: '—',
+  err: '—',
+  nav: '—',
+})
+
+function screenScale() {
+  return map ? map.getZoomScale(map.getZoom(), 0) : 1
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v))
+}
+
+/* ===== backend/ui y normalization ===== */
+
+function backendYToUiY(yBackend) {
+  if (!BACKEND_Y_IS_BOTTOM_ORIGIN) return yBackend
+  return (WORLD.rows - 1) - yBackend
+}
+function uiYToBackendY(yUi) {
+  if (!BACKEND_Y_IS_BOTTOM_ORIGIN) return yUi
+  return (WORLD.rows - 1) - yUi
+}
+
+/* ===== CRS.Simple mapping (y down) ===== */
+
+function tileTopLeftLatLng(x, yUi) {
+  return L.latLng(-yUi * WORLD.cellPx, x * WORLD.cellPx)
+}
+
+function tileCenterLatLng(x, yUi, w = 1, h = 1) {
+  const cx = (x + w / 2) * WORLD.cellPx
+  const cy = (yUi + h / 2) * WORLD.cellPx
+  return L.latLng(-cy, cx)
+}
+
+function latLngToTileXY(latlng) {
+  const x = clamp(Math.floor(latlng.lng / WORLD.cellPx), 0, WORLD.cols - 1)
+  const y = clamp(Math.floor((-latlng.lat) / WORLD.cellPx), 0, WORLD.rows - 1)
+  return { x, y }
+}
+
+/* ===== active / flip ===== */
+
+function activeKeyFromRoute() {
+  if (route.name !== 'tile') return null
+  const x = Number(route.params.x)
+  const y = Number(route.params.y)
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+  return `${x}:${y}`
+}
+
+function isActive(t) {
+  return activeKeyFromRoute() === `${t.x}:${t.y}`
+}
+
+function isFlipped(t) {
+  return flippedKey.value === `${t.x}:${t.y}`
+}
+
+/**
+ * NEW UX:
+ * - One click flips/opens in-place (no centering)
+ * - Clicking a different tile activates it (no centering) + closes previous flip
+ */
+function handleTileClick(t) {
+  // If the user just dragged the map, ignore the click.
+  // This prevents "mouseup click" from toggling tiles.
+  if (didMoveSinceDown) return
+
+   const k = `${t.x}:${t.y}`
+   const activeK = activeKeyFromRoute()
+
+   // Clicking active tile toggles flip
+   if (activeK === k) {
+     flippedKey.value = flippedKey.value === k ? null : k
+     return
+   }
+
+   // Clicking a different tile:
+   // - make it active
+   // - ALSO open it (flipped) immediately
+   flippedKey.value = k
+
+   // Mark the next route as coming from a click so route handler won't center
+   pendingNavSource = 'click'
+   router.push({ name: 'tile', params: { z: WORLD.z, x: t.x, y: t.y } })
+ }
+
+ function onTileClick(t) {
+   handleTileClick(t)
+ }
+
+
+/* ===== leaflet pane mounting ===== */
+
+function mountAnchorsIntoPane() {
+  if (!map) return
+  const el = anchorLayerEl.value
+  if (!el) return
+
+  const paneName = 'ewrmAnchors'
+  const pane = map.getPane(paneName) || map.createPane(paneName)
+
+  pane.style.zIndex = '600'
+  pane.style.pointerEvents = 'none'
+  pane.appendChild(el)
+
+  el.style.position = 'absolute'
+  el.style.left = '0'
+  el.style.top = '0'
+  el.style.width = '1px'
+  el.style.height = '1px'
+  el.style.pointerEvents = 'none'
+}
+
+/* ===== anchors in pane (layer points) ===== */
+
+function recomputeAnchorPositions() {
+  if (!map) return
+  anchorLayerPos.clear()
+
+  for (const t of anchors.value) {
+    const lp = map.latLngToLayerPoint(tileTopLeftLatLng(t.x, t.y))
+    anchorLayerPos.set(`${t.x}:${t.y}`, { x: lp.x, y: lp.y })
+  }
+}
+
+function tileStyle(t) {
+  const pos = anchorLayerPos.get(`${t.x}:${t.y}`)
+  if (!pos) return { display: 'none' }
+
+  const s = screenScale()
+
+  const w = Math.max(1, Number(t.w || 1)) * WORLD.cellPx * s
+  const h = Math.max(1, Number(t.h || 1)) * WORLD.cellPx * s
+
+  return {
+    transform: `translate3d(${Math.round(pos.x)}px, ${Math.round(pos.y)}px, 0)`,
+    width: `${Math.round(w)}px`,
+    height: `${Math.round(h)}px`,
+    pointerEvents: 'auto',
+  }
+}
+
+
+/* ===== viewport bounds ===== */
+
+function currentTileBoundsWithPad_UI() {
+  if (!map) return { xmin: 0, xmax: 0, ymin: 0, ymax: 0 }
+
+  const size = map.getSize()
+  const tl = map.containerPointToLatLng([0, 0])
+  const br = map.containerPointToLatLng([size.x, size.y])
+
+  const a = latLngToTileXY(tl)
+  const b = latLngToTileXY(br)
+
+  let xmin = Math.min(a.x, b.x)
+  let xmax = Math.max(a.x, b.x)
+  let ymin = Math.min(a.y, b.y)
+  let ymax = Math.max(a.y, b.y)
+
+  xmin = clamp(xmin - WORLD.pad, 0, WORLD.cols - 1)
+  xmax = clamp(xmax + WORLD.pad, 0, WORLD.cols - 1)
+  ymin = clamp(ymin - WORLD.pad, 0, WORLD.rows - 1)
+  ymax = clamp(ymax + WORLD.pad, 0, WORLD.rows - 1)
+
+  return { xmin, xmax, ymin, ymax }
+}
+
+function boundsToRect(bounds) {
+  const x = bounds.xmin
+  const y = bounds.ymin
+  const w = (bounds.xmax - bounds.xmin) + 1
+  const h = (bounds.ymax - bounds.ymin) + 1
+  return { x, y, w, h }
+}
+
+function updateHud() {
+  if (!map) return
+  const tb = currentTileBoundsWithPad_UI()
+  const c = latLngToTileXY(map.getCenter())
+
+  hud.tb = `${tb.xmin}..${tb.xmax}, ${tb.ymin}..${tb.ymax}`
+  hud.ct = `${c.x},${c.y}`
+  hud.route = route.name === 'tile'
+    ? `/w/10/${route.params.x}/${route.params.y}`
+    : String(route.fullPath)
+  hud.nav = pendingNavSource || '—'
+}
+
+
+/* ===== API ===== */
+
+let infraAbort = null
+
+async function refreshInfra() {
+  if (!map) return
+
+  try { infraAbort?.abort() } catch (_) {}
+  infraAbort = new AbortController()
+
+  const ui = currentTileBoundsWithPad_UI()
+
+  const by1 = uiYToBackendY(ui.ymin)
+  const by2 = uiYToBackendY(ui.ymax)
+  const yminBackend = Math.min(by1, by2)
+  const ymaxBackend = Math.max(by1, by2)
+
+  const qs = new URLSearchParams({
+    z: String(WORLD.z),
+    xmin: String(ui.xmin),
+    xmax: String(ui.xmax),
+    ymin: String(yminBackend),
+    ymax: String(ymaxBackend),
+  })
+
+  try {
+    const res = await fetch(`/api/world/infra?${qs.toString()}`, {
+      signal: infraAbort.signal,
+    })
+    const data = await res.json()
+
+    infraTiles.value = data.map(t => ({
+      x: Number(t.x),
+      y: backendYToUiY(Number(t.y)),
+      role: t.role,
+    }))
+  } catch (err) {
+    if (err?.name === 'AbortError') return
+    hud.err = String(err?.message || err)
+    console.error(err)
+  }
+}
+
+
+
+
+async function refreshViewport() {
+  if (!map) return
+
+  try { viewportAbort?.abort() } catch (_) {}
+  viewportAbort = new AbortController()
+
+  const ui = currentTileBoundsWithPad_UI()
+
+  // Convert UI y-bounds to backend y-bounds (noop when BACKEND_Y_IS_BOTTOM_ORIGIN=false)
+  const by1 = uiYToBackendY(ui.ymin)
+  const by2 = uiYToBackendY(ui.ymax)
+  const yminBackend = Math.min(by1, by2)
+  const ymaxBackend = Math.max(by1, by2)
+
+  // Canonical viewport params: x,y,w,h (tile coordinates)
+  const rect = boundsToRect({
+    xmin: ui.xmin,
+    xmax: ui.xmax,
+    ymin: yminBackend,
+    ymax: ymaxBackend,
+  })
+
+  try {
+    const payload = await fetchViewport(
+      { x: rect.x, y: rect.y, w: rect.w, h: rect.h },
+      { signal: viewportAbort.signal }
+    )
+
+    anchors.value = (payload.anchors || []).map(t => {
+      const x = Number(t.x)
+      const yBackend = Number(t.y)
+      const yUi = backendYToUiY(yBackend)
+
+      return {
+        x,
+        y: yUi,
+        w: Math.max(1, Number(t.w || 1)),
+        h: Math.max(1, Number(t.h || 1)),
+        cover: t.cover || null,
+        object: t.object || null,
+      }
+    })
+
+    recomputeAnchorPositions()
+    hud.err = '—'
+  } catch (err) {
+    if (err?.name === 'AbortError') return
+    hud.err = String(err?.message || err)
+    console.error(err)
+  }
+}
+
+/* ===== deep-link centering ===== */
+
+async function centerDeepLinkIfNeeded() {
+  if (!map) return
+
+  // Object route resolves to tile route first
+  if (route.name === 'object') {
+    const bundle = String(route.params.bundle)
+    const slug = String(route.params.slug)
+    const resolved = await resolveObject({ bundle, slug })
+    if (resolved?.found && resolved?.anchor) {
+      const ax = Number(resolved.anchor.x)
+      const ayUi = backendYToUiY(Number(resolved.anchor.y))
+      router.replace({ name: 'tile', params: { z: WORLD.z, x: ax, y: ayUi } })
+    }
+    return
+  }
+
+  if (route.name !== 'tile') return
+
+  const x = clamp(parseInt(route.params.x, 10), 0, WORLD.cols - 1)
+  const yUi = clamp(parseInt(route.params.y, 10), 0, WORLD.rows - 1)
+  const yBackend = uiYToBackendY(yUi)
+
+  try {
+    const data = await fetchCell({ x, y: yBackend })
+    const ax = Number(data?.anchor?.x ?? x)
+    const ayBackend = Number(data?.anchor?.y ?? yBackend)
+    const aw = Math.max(1, Number(data?.anchor?.w ?? 1))
+    const ah = Math.max(1, Number(data?.anchor?.h ?? 1))
+    const ayUi = backendYToUiY(ayBackend)
+
+    map.setView(tileCenterLatLng(ax, ayUi, aw, ah), map.getZoom(), { animate: false })
+  } catch (_) {
+    map.setView(tileCenterLatLng(x, yUi, 1, 1), map.getZoom(), { animate: false })
+  }
+}
+
+/* ===== canvas ===== */
+
+function resizeCanvas() {
+  const host = mapEl.value
+  const canvas = gridCanvasEl.value
+  if (!host || !canvas) return
+
+  const rect = host.getBoundingClientRect()
+  const dpr = window.devicePixelRatio || 1
+
+  canvas.style.width = `${Math.round(rect.width)}px`
+  canvas.style.height = `${Math.round(rect.height)}px`
+  canvas.width = Math.round(rect.width * dpr)
+  canvas.height = Math.round(rect.height * dpr)
+
+  ctx = canvas.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+}
+
+function drawGrid() {
+  if (!map || !ctx) return
+
+  const canvas = gridCanvasEl.value
+  const w = canvas.clientWidth
+  const h = canvas.clientHeight
+
+  ctx.clearRect(0, 0, w, h)
+  ctx.lineWidth = 1
+  ctx.strokeStyle = 'rgba(0,0,0,0.10)'
+  ctx.fillStyle = 'rgba(0,0,0,0.40)'
+  ctx.font = '12px system-ui'
+  ctx.textBaseline = 'top'
+
+  const s = screenScale()
+  const cellPxScreen = WORLD.cellPx * s
+  const { xmin, xmax, ymin, ymax } = currentTileBoundsWithPad_UI()
+
+  // --- infra (ybr/road) ---
+  // Draw FIRST so grid lines/text sit on top.
+  for (const t of infraTiles.value) {
+    // Skip anything not in the visible padded bounds (cheap guard)
+    if (t.x < xmin || t.x > xmax || t.y < ymin || t.y > ymax) continue
+
+    const p = map.latLngToContainerPoint(tileTopLeftLatLng(t.x, t.y))
+    const px = Math.round(p.x)
+    const py = Math.round(p.y)
+
+    if (t.role === 'ybr') {
+      ctx.fillStyle = 'rgba(244, 197, 66, 0.85)' // temp “yellow brick”
+      ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+    } else if (t.role === 'road') {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.12)'
+      ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+    }
+  }
+
+
+  for (let y = ymin; y <= ymax; y++) {
+    for (let x = xmin; x <= xmax; x++) {
+      const p = map.latLngToContainerPoint(tileTopLeftLatLng(x, y))
+      const px = Math.round(p.x)
+      const py = Math.round(p.y)
+
+      ctx.strokeRect(px, py, cellPxScreen, cellPxScreen)
+      ctx.fillText(`${x},${y}`, px + 6, py + 6)
+    }
+  }
+}
+
+
+function scheduleFrame() {
+  if (raf) return
+  raf = requestAnimationFrame(() => {
+    raf = 0
+    recomputeAnchorPositions()
+    drawGrid()
+    updateHud()
+  })
+}
+
+/* ===== route pipeline ===== */
+
+async function handleRoutePipeline() {
+  if (!map) return
+
+  const source = pendingNavSource
+  // Consume it NOW so it only applies to one navigation
+  pendingNavSource = null
+
+  const isDeepLinkCenterCase =
+    !hasInitialized || // first load should center
+    (source !== 'click' && (route.name === 'tile' || route.name === 'object')) // address bar/back/forward should center
+
+  if (isDeepLinkCenterCase) {
+    await centerDeepLinkIfNeeded()
+  }
+
+  // Auto-open on deep-link style navigation (NOT clicks).
+  // This makes /w/... feel intentional: you land on content, not just a highlight.
+  if (source !== 'click' && route.name === 'tile') {
+    const rx = Number(route.params.x)
+    const ry = Number(route.params.y)
+    if (Number.isFinite(rx) && Number.isFinite(ry)) {
+      flippedKey.value = `${rx}:${ry}`
+    }
+  }
+
+
+  hasInitialized = true
+
+  await refreshViewport()
+  await refreshInfra()
+  scheduleFrame()
+
+}
+
+/* ===== lifecycle ===== */
+
+let ro = null
+
+onMounted(async () => {
+  const worldWidth = WORLD.cols * WORLD.cellPx
+  const worldHeight = WORLD.rows * WORLD.cellPx
+  const bounds = L.latLngBounds([0, 0], [-worldHeight, worldWidth])
+
+  // Wait one frame so the container has a real size (DevTools device mode included)
+  await new Promise(requestAnimationFrame)
+
+  const containerWidth = mapEl.value.getBoundingClientRect().width
+  const isMobile = containerWidth < 768
+
+  const TILE_PX = WORLD.cellPx // 256
+  const paddingPx = 32
+
+  // Fit 2 tiles across into viewport width
+  const lockedZoom = isMobile
+    ? Math.log2(containerWidth / ((2 * TILE_PX) + paddingPx))
+    : 0
+
+  map = L.map(mapEl.value, {
+    crs: L.CRS.Simple,
+
+    // allow fractional zoom
+    zoomSnap: 0,
+    zoomDelta: 0.25,
+
+    // lock zoom
+    zoom: lockedZoom,
+    minZoom: lockedZoom,
+    maxZoom: lockedZoom,
+
+    dragging: true,
+    inertia: true,
+    inertiaThreshold: 0,
+    inertiaDeceleration: 900,
+    inertiaMaxSpeed: 3500,
+    easeLinearity: 0.12,
+    maxBoundsViscosity: 0.5,
+
+    zoomControl: false,
+    attributionControl: false,
+    scrollWheelZoom: false,
+    doubleClickZoom: false,
+    touchZoom: false,
+    boxZoom: false,
+    keyboard: false,
+
+    zoomAnimation: false,
+    fadeAnimation: false,
+    markerZoomAnimation: false,
+  })
+
+  // Debug overlay (DevTools proof)
+  const debug = document.createElement('div')
+  debug.style.position = 'absolute'
+  debug.style.top = '8px'
+  debug.style.left = '8px'
+  debug.style.zIndex = '99999'
+  debug.style.padding = '6px 10px'
+  debug.style.background = 'rgba(0,0,0,0.7)'
+  debug.style.color = '#fff'
+  debug.style.borderRadius = '10px'
+  debug.style.font = '12px system-ui'
+  debug.textContent = `w=${Math.round(containerWidth)} zoom=${lockedZoom.toFixed(2)}`
+  mapEl.value.appendChild(debug)
+
+  map.setMaxBounds(bounds)
+
+  // IMPORTANT: do NOT force zoom=0 here. Use lockedZoom (or omit zoom arg).
+  map.setView(L.latLng(-worldHeight / 2, worldWidth / 2), lockedZoom, { animate: false })
+
+  mountAnchorsIntoPane()
+
+  resizeCanvas()
+  ro = new ResizeObserver(() => {
+    resizeCanvas()
+    scheduleFrame()
+  })
+  ro.observe(mapEl.value)
+
+  // ...keep the rest of your listeners exactly as you had them...
+  map.on('movestart', () => { didMoveSinceDown = true })
+
+  map.on('moveend', async () => {
+    setTimeout(() => { didMoveSinceDown = false }, 0)
+    await refreshViewport()
+    await refreshInfra()
+    scheduleFrame()
+  })
+
+  map.on('move', scheduleFrame)
+
+  map.on('click', (e) => {
+    if (didMoveSinceDown) return
+    const target = e.originalEvent?.target
+    if (target && target.closest && target.closest('.tile-shell')) return
+    const { x, y } = latLngToTileXY(e.latlng)
+    flippedKey.value = null
+    pendingNavSource = 'click'
+    router.push({ name: 'tile', params: { z: WORLD.z, x, y } })
+  })
+
+  requestAnimationFrame(() => {
+    map.invalidateSize({ pan: false })
+    scheduleFrame()
+    handleRoutePipeline().catch(console.error)
+  })
+})
+
+
+
+watch(
+  () => route.fullPath,
+  () => handleRoutePipeline().catch(console.error)
+)
+
+onBeforeUnmount(() => {
+  try { infraAbort?.abort() } catch (_) {}
+
+  if (raf) cancelAnimationFrame(raf)
+  try { viewportAbort?.abort() } catch (_) {}
+  ro?.disconnect()
+  map?.remove()
+  map = null
+  anchorLayerPos.clear()
+})
+</script>
+
+<style scoped>
+.wrap {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+}
+
+.map {
+  width: 100%;
+  height: 100%;
+}
+
+:deep(.leaflet-container) {
+  background: #eee;
+}
+
+.grid-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.anchor-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  z-index: 20;
+}
+
+.tile-shell {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: auto;
+  will-change: transform;
+}
+
+.tile-shell.is-active {
+  outline: 4px solid rgba(0, 0, 0, 0.6);
+  outline-offset: -4px;
+  z-index: 5;
+}
+
+.hud {
+  position: fixed;
+  left: 10px;
+  top: 10px;
+  z-index: 9999;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: #111;
+  pointer-events: none;
+}
+</style>

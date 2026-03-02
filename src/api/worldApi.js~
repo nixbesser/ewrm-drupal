@@ -1,0 +1,45 @@
+const BASE = import.meta.env?.VITE_API_BASE ?? '';
+
+async function getJson(url, options = {}) {
+  const { signal } = options;
+
+  let res;
+  try {
+    res = await fetch(url, {
+      headers: { Accept: 'application/json' },
+      signal,
+    });
+  } catch (err) {
+    // Abort is expected during rapid pan / route changes.
+    if (err?.name === 'AbortError') throw err;
+    throw new Error(`Network error: ${err?.message || String(err)}`);
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`API ${res.status}: ${text || res.statusText}`);
+  }
+
+  return res.json();
+}
+
+function qs(params) {
+  const sp = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === undefined || v === null) return;
+    sp.set(k, String(v));
+  });
+  return sp.toString();
+}
+
+export function fetchViewport({ z, xmin, xmax, ymin, ymax }, options = {}) {
+  return getJson(`${BASE}/api/world/viewport?${qs({ z, xmin, xmax, ymin, ymax })}`, options);
+}
+
+export function fetchCell({ z, x, y }, options = {}) {
+  return getJson(`${BASE}/api/world/cell?${qs({ z, x, y })}`, options);
+}
+
+export function resolveObject({ bundle, slug, z }, options = {}) {
+  return getJson(`${BASE}/api/world/resolve?${qs({ bundle, slug, z })}`, options);
+}
