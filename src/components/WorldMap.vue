@@ -357,16 +357,12 @@ function rememberFetched(rect) {
   if (infraFetchedRects.length > 80) infraFetchedRects.splice(0, 20)
 }
 
-let infraAbort = null
 let infraMoveTimer = 0
 let infraMoveScheduled = false
 
 async function refreshInfraForRect_UI(uiRect) {
   if (!map) return
   if (alreadyFetched(uiRect)) return
-
-  try { infraAbort?.abort() } catch (_) {}
-  infraAbort = new AbortController()
 
   // Convert UI y bounds to backend y bounds safely
   const by1 = uiYToBackendY(uiRect.ymin)
@@ -384,8 +380,12 @@ async function refreshInfraForRect_UI(uiRect) {
 
   const res = await fetch(`/api/world/infra?${qs.toString()}`, {
     headers: { Accept: 'application/json' },
-    signal: infraAbort.signal,
   })
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '')
+    throw new Error(`infra HTTP ${res.status}: ${txt.slice(0, 120)}`)
+  }
 
   const ct = res.headers.get('content-type') || ''
   if (!ct.includes('application/json')) {
@@ -714,8 +714,14 @@ onMounted(async () => {
   })
 
   // On moveend: fetch anchors + bigger infra prefetch
-  map.on('moveend', async () => {
+map.on('moveend', async () => {
+    // prevent a late throttled "move" fetch from firing after moveend
+    if (infraMoveTimer) clearTimeout(infraMoveTimer)
+    infraMoveTimer = 0
+    infraMoveScheduled = false
+
     setTimeout(() => { didMoveSinceDown = false }, 0)
+
     try {
       await refreshViewport()
       await refreshInfraMoveEnd()
@@ -757,11 +763,13 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  try { infraAbort?.abort() } catch (_) {}
   try { cellAbort?.abort() } catch (_) {}
   try { viewportAbort?.abort() } catch (_) {}
 
   if (infraMoveTimer) clearTimeout(infraMoveTimer)
+  infraMoveTimer = 0
+  infraMoveScheduled = false
+
   if (raf) cancelAnimationFrame(raf)
 
   ro?.disconnect()
@@ -769,6 +777,7 @@ onBeforeUnmount(() => {
   map = null
   anchorLayerPos.clear()
 })
+
 </script>
 
 <style scoped>
