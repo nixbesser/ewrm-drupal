@@ -27,6 +27,7 @@
       <div>tileBounds: {{ hud.tb }}</div>
       <div>centerTile: {{ hud.ct }}</div>
       <div>anchors: {{ anchors.length }}</div>
+      <div>anchorCache: {{ anchorCacheSize }}</div>
       <div>pendingNavSource: {{ hud.nav }}</div>
       <div>lastErr: {{ hud.err }}</div>
       <div>infra(nonzero): {{ infraCount }}</div>
@@ -45,13 +46,13 @@ import TileAnchor from './TileAnchor.vue'
 /**
  * BEST UX SETTINGS
  * - Render on every move via RAF (drag + inertia)
- * - Fetch infra progressively while moving (throttled + abortable + deduped)
+ * - Fetch infra progressively while moving (throttled + deduped)
  */
 const WORLD = { z: 10, cols: 1024, rows: 1024, cellPx: 256 }
 const BACKEND_Y_IS_BOTTOM_ORIGIN = false
 
 // Fetch radii (pads):
-const PAD_ANCHORS = 2
+const PAD_ANCHORS = 12
 const PAD_INFRA_MOVE = 16   // prefetch while moving
 const PAD_INFRA_END = 24    // bigger prefetch on moveend
 const PAD_DRAW = 2
@@ -62,12 +63,21 @@ const INFRA_MOVE_THROTTLE_MS = 250
 // Role encoding (1 byte per tile)
 const ROLE = { NONE: 0, ROAD: 1, YBR: 2, PLAZA: 3 }
 
+// Anchor cache hygiene (future-proof)
+const ANCHOR_CACHE_MAX = 8000                 // hard cap (LRU)
+const ANCHOR_CACHE_TTL_MS = 30 * 60 * 1000    // 30 minutes since last seen
+const ANCHOR_CACHE_PRUNE_EVERY = 25           // prune every N viewport refreshes
+const anchorCacheSize = ref(0)
+
 const mapEl = ref(null)
 const gridCanvasEl = ref(null)
 const anchorLayerEl = ref(null)
 
 const anchors = ref([])
-const anchorLayerPos = new Map()
+
+// Anchor cache: key "x:y" (UI coords) -> anchor object {.., lastSeenMs}
+const anchorCache = new Map()
+let anchorPruneCounter = 0
 
 let map = null
 let ctx = null
@@ -106,6 +116,33 @@ function screenScale() {
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v))
+}
+
+/* ===== anchor cache helpers (LRU + TTL) ===== */
+
+function anchorKey(x, yUi) {
+  return `${x}:${yUi}`
+}
+
+// LRU touch: move entry to the end (most recently used)
+function touchAnchor(key, value) {
+  anchorCache.delete(key)
+  anchorCache.set(key, value)
+}
+
+function evictAnchorsLRU() {
+  while (anchorCache.size > ANCHOR_CACHE_MAX) {
+    const oldestKey = anchorCache.keys().next().value
+    if (oldestKey == null) break
+    anchorCache.delete(oldestKey)
+  }
+}
+
+function pruneAnchorsTTL(nowMs) {
+  const cutoff = nowMs - ANCHOR_CACHE_TTL_MS
+  for (const [k, a] of anchorCache) {
+    if ((a.lastSeenMs || 0) < cutoff) anchorCache.delete(k)
+  }
 }
 
 /* ===== backend/ui y normalization ===== */
@@ -176,14 +213,6 @@ function tileBoundsWithPad_UI(pad) {
   return { xmin, xmax, ymin, ymax }
 }
 
-function boundsToRect(bounds) {
-  const x = bounds.xmin
-  const y = bounds.ymin
-  const w = (bounds.xmax - bounds.xmin) + 1
-  const h = (bounds.ymax - bounds.ymin) + 1
-  return { x, y, w, h }
-}
-
 /* ===== active / flip ===== */
 
 function activeKeyFromRoute() {
@@ -242,27 +271,162 @@ function mountAnchorsIntoPane() {
   el.style.width = '1px'
   el.style.height = '1px'
   el.style.pointerEvents = 'none'
+
+  requestAnimationFrame(() => {
+    const el = anchorLayerEl.value
+    if (!el) return
+    if (!el.closest('.leaflet-pane')) {
+      pane.appendChild(el)
+    }
+  })
 }
 
-function recomputeAnchorPositions() {
-  if (!map) return
-  anchorLayerPos.clear()
-  for (const t of anchors.value) {
-    const lp = map.latLngToLayerPoint(tileTopLeftLatLng(t.x, t.y))
-    anchorLayerPos.set(`${t.x}:${t.y}`, { x: lp.x, y: lp.y })
+/* ===== infra visuals: gravel + brick patterns ===== */
+
+let gravelPattern = null
+let brickPattern = null
+
+function makeGravelPattern() {
+  const c = document.createElement('canvas')
+  c.width = 128
+  c.height = 128
+  const g = c.getContext('2d')
+
+  // base tone (neutral crushed stone)
+  g.fillStyle = 'rgba(115,115,115,0.22)'
+  g.fillRect(0, 0, c.width, c.height)
+
+  // helper: draw a tiny rotated "chip"
+  function chip(x, y, w, h, angleRad, fill) {
+    g.save()
+    g.translate(x, y)
+    g.rotate(angleRad)
+    g.fillStyle = fill
+    // centered rect
+    g.fillRect(-w / 2, -h / 2, w, h)
+    g.restore()
   }
+
+  // lots of small dark chips
+  for (let i = 0; i < 1200; i++) {
+    const x = Math.random() * c.width
+    const y = Math.random() * c.height
+    const w = Math.random() * 2.2 + 0.6
+    const h = Math.random() * 1.6 + 0.4
+    const a = (Math.random() * Math.PI)
+    const alpha = Math.random() * 0.18 + 0.04
+    chip(x, y, w, h, a, `rgba(55,55,55,${alpha})`)
+  }
+
+  // medium light chips
+  for (let i = 0; i < 600; i++) {
+    const x = Math.random() * c.width
+    const y = Math.random() * c.height
+    const w = Math.random() * 2.6 + 0.8
+    const h = Math.random() * 1.9 + 0.5
+    const a = (Math.random() * Math.PI)
+    const alpha = Math.random() * 0.12 + 0.03
+    chip(x, y, w, h, a, `rgba(235,235,235,${alpha})`)
+  }
+
+  // a few larger "chips" to sell the crushed-stone look
+  for (let i = 0; i < 120; i++) {
+    const x = Math.random() * c.width
+    const y = Math.random() * c.height
+    const w = Math.random() * 5.5 + 2.0
+    const h = Math.random() * 3.5 + 1.5
+    const a = (Math.random() * Math.PI)
+    const alpha = Math.random() * 0.10 + 0.03
+    chip(x, y, w, h, a, `rgba(80,80,80,${alpha})`)
+  }
+
+  // faint dusting to soften hard edges (very subtle)
+  g.globalAlpha = 0.10
+  g.fillStyle = 'rgba(255,255,255,0.20)'
+  for (let i = 0; i < 180; i++) {
+    const x = Math.random() * c.width
+    const y = Math.random() * c.height
+    g.fillRect(x, y, 1, 1)
+  }
+  g.globalAlpha = 1
+
+  return g.createPattern(c, 'repeat')
 }
+
+function makeBrickPattern() {
+  const c = document.createElement('canvas')
+  c.width = 128
+  c.height = 128
+  const g = c.getContext('2d')
+
+  // mortar base
+  g.fillStyle = 'rgba(90,75,30,0.35)'
+  g.fillRect(0, 0, c.width, c.height)
+
+  const brickW = 28
+  const brickH = 14
+  const gap = 2
+
+  for (let row = 0; row < 10; row++) {
+    const y = row * (brickH + gap)
+    const offset = (row % 2) * Math.floor((brickW + gap) / 2)
+
+    for (let col = -1; col < 10; col++) {
+      const x = col * (brickW + gap) + offset
+
+      // brick fill
+      g.fillStyle = 'rgba(244,197,66,0.75)'
+      g.fillRect(x, y, brickW, brickH)
+
+      // subtle shading
+      g.fillStyle = 'rgba(150,110,20,0.18)'
+      g.fillRect(x, y + brickH - 3, brickW, 3)
+
+      // highlight edge
+      g.fillStyle = 'rgba(255,255,255,0.10)'
+      g.fillRect(x + 1, y + 1, brickW - 2, 2)
+    }
+  }
+
+  // mortar lines
+  g.strokeStyle = 'rgba(60,45,15,0.22)'
+  g.lineWidth = 1
+  for (let y = 0; y <= c.height; y += (brickH + gap)) {
+    g.beginPath()
+    g.moveTo(0, y + 0.5)
+    g.lineTo(c.width, y + 0.5)
+    g.stroke()
+  }
+
+  return g.createPattern(c, 'repeat')
+}
+
+function anchorsAreInLeafletPane() {
+  const el = anchorLayerEl.value
+  if (!el) return false
+  return !!el.closest('.leaflet-pane')
+}
+
+/* ===== anchors ===== */
 
 function tileStyle(t) {
-  const pos = anchorLayerPos.get(`${t.x}:${t.y}`)
-  if (!pos) return { display: 'none' }
+  if (!map) return { display: 'none' }
 
-  const s = screenScale()
+  const inPane = anchorsAreInLeafletPane()
+
+  // Position
+  const p = inPane
+    ? map.latLngToLayerPoint(tileTopLeftLatLng(t.x, t.y))
+    : map.latLngToContainerPoint(tileTopLeftLatLng(t.x, t.y))
+
+  // Size
+  const s = inPane ? 1 : screenScale()
+
   const w = Math.max(1, Number(t.w || 1)) * WORLD.cellPx * s
   const h = Math.max(1, Number(t.h || 1)) * WORLD.cellPx * s
 
   return {
-    transform: `translate3d(${Math.round(pos.x)}px, ${Math.round(pos.y)}px, 0)`,
+    transform: `translate3d(${Math.round(p.x)}px, ${Math.round(p.y)}px, 0)`,
     width: `${Math.round(w)}px`,
     height: `${Math.round(h)}px`,
     pointerEvents: 'auto',
@@ -283,7 +447,7 @@ function updateHud() {
   hud.nav = pendingNavSource || '—'
 }
 
-/* ===== API: anchors ===== */
+/* ===== API: anchors (LRU+TTL cache) ===== */
 
 async function refreshViewport() {
   if (!map) return
@@ -298,12 +462,12 @@ async function refreshViewport() {
   const yminBackend = Math.min(by1, by2)
   const ymaxBackend = Math.max(by1, by2)
 
-  const rect = boundsToRect({
-    xmin: ui.xmin,
-    xmax: ui.xmax,
-    ymin: yminBackend,
-    ymax: ymaxBackend,
-  })
+  const rect = {
+    x: ui.xmin,
+    y: yminBackend,
+    w: (ui.xmax - ui.xmin) + 1,
+    h: (ymaxBackend - yminBackend) + 1,
+  }
 
   try {
     const payload = await fetchViewport(
@@ -311,21 +475,51 @@ async function refreshViewport() {
       { signal: viewportAbort.signal }
     )
 
-    anchors.value = (payload.anchors || []).map(t => {
+    const now = Date.now()
+
+    // 1) Merge newly fetched anchors into cache (touch = LRU)
+    for (const t of (payload.anchors || [])) {
       const x = Number(t.x)
-      const yBackend = Number(t.y)
-      const yUi = backendYToUiY(yBackend)
-      return {
+      const yUi = backendYToUiY(Number(t.y))
+      if (!Number.isFinite(x) || !Number.isFinite(yUi)) continue
+
+      const k = anchorKey(x, yUi)
+      const a = {
         x,
         y: yUi,
         w: Math.max(1, Number(t.w || 1)),
         h: Math.max(1, Number(t.h || 1)),
         cover: t.cover || null,
         object: t.object || null,
+        lastSeenMs: now,
       }
-    })
+      touchAnchor(k, a)
+    }
 
-    recomputeAnchorPositions()
+    // 2) Render list from cache, filtered to padded viewport (intersection test).
+    // Snapshot entries first so we can "touch" while iterating safely.
+    const list = []
+    const entries = Array.from(anchorCache.entries())
+    for (const [k, a] of entries) {
+      const ax2 = a.x + a.w - 1
+      const ay2 = a.y + a.h - 1
+      if (ax2 < ui.xmin || a.x > ui.xmax || ay2 < ui.ymin || a.y > ui.ymax) continue
+
+      a.lastSeenMs = now
+      touchAnchor(k, a)
+      list.push(a)
+    }
+
+    anchors.value = list
+    anchorCacheSize.value = anchorCache.size
+
+    // 3) Hygiene: TTL prune occasionally, LRU eviction always
+    anchorPruneCounter++
+    if (anchorPruneCounter % ANCHOR_CACHE_PRUNE_EVERY === 0) {
+      pruneAnchorsTTL(now)
+    }
+    evictAnchorsLRU()
+
     hud.err = '—'
   } catch (err) {
     if (err?.name === 'AbortError') return
@@ -347,13 +541,11 @@ function rectCovers(a, b) {
 }
 
 function alreadyFetched(rect) {
-  // If ANY prior rect fully covers this, we can skip
   return infraFetchedRects.some(r => rectCovers(r, rect))
 }
 
 function rememberFetched(rect) {
   infraFetchedRects.push(rect)
-  // Optional: cap list to keep it bounded
   if (infraFetchedRects.length > 80) infraFetchedRects.splice(0, 20)
 }
 
@@ -364,7 +556,6 @@ async function refreshInfraForRect_UI(uiRect) {
   if (!map) return
   if (alreadyFetched(uiRect)) return
 
-  // Convert UI y bounds to backend y bounds safely
   const by1 = uiYToBackendY(uiRect.ymin)
   const by2 = uiYToBackendY(uiRect.ymax)
   const yminBackend = Math.min(by1, by2)
@@ -424,12 +615,11 @@ function requestInfraWhileMoving() {
     infraMoveScheduled = false
     if (!map) return
 
-    // While moving, fetch smaller pad, but more frequently
     const ui = tileBoundsWithPad_UI(PAD_INFRA_MOVE)
 
     try {
       await refreshInfraForRect_UI(ui)
-      scheduleFrame() // show newly merged infra ASAP
+      scheduleFrame()
     } catch (err) {
       if (err?.name === 'AbortError') return
       hud.err = String(err?.message || err)
@@ -541,8 +731,11 @@ function resizeCanvas() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 }
 
+
 function drawGrid() {
   if (!map || !ctx) return
+
+const SHOW_GRID = true
 
   const canvas = gridCanvasEl.value
   const w = canvas.clientWidth
@@ -560,6 +753,18 @@ function drawGrid() {
   const px0 = Math.round(p0.x)
   const py0 = Math.round(p0.y)
 
+  // keep patterns stable relative to world/grid
+  if (gravelPattern?.setTransform) {
+    gravelPattern.setTransform(new DOMMatrix().translate(px0, py0))
+  }
+  if (brickPattern?.setTransform) {
+    brickPattern.setTransform(new DOMMatrix().translate(px0, py0))
+  }
+
+  // thresholds: keep mobile fast
+  const useTextures = cellPxScreen >= 40
+  const useDetailEdges = cellPxScreen >= 60
+
   // infra
   for (let y = ymin; y <= ymax; y++) {
     const py = py0 + (y - ymin) * cellPxScreen
@@ -571,11 +776,35 @@ function drawGrid() {
       const px = px0 + (x - xmin) * cellPxScreen
 
       if (role === ROLE.YBR) {
-        ctx.fillStyle = 'rgba(244, 197, 66, 0.85)'
+        // base gold tint
+        ctx.fillStyle = 'rgba(244, 197, 66, 0.70)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+
+        // brick overlay
+        if (useTextures && brickPattern) {
+          ctx.fillStyle = brickPattern
+          ctx.globalAlpha = 0.95
+          ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+          ctx.globalAlpha = 1
+        }
       } else if (role === ROLE.ROAD) {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.12)'
+        // base neutral road
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.10)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+
+        // gravel overlay
+        if (useTextures && gravelPattern) {
+          ctx.fillStyle = gravelPattern
+          ctx.globalAlpha = 1
+          ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+        }
+
+        // subtle edge so it reads as a path
+        if (useDetailEdges) {
+          ctx.strokeStyle = 'rgba(0,0,0,0.12)'
+          ctx.lineWidth = 1
+          ctx.strokeRect(px + 0.5, py + 0.5, cellPxScreen - 1, cellPxScreen - 1)
+        }
       } else if (role === ROLE.PLAZA) {
         ctx.fillStyle = 'rgba(90, 90, 90, 0.10)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
@@ -584,20 +813,22 @@ function drawGrid() {
   }
 
   // grid (labels optional; keep off while moving for FPS)
-  ctx.lineWidth = 1
-  ctx.strokeStyle = 'rgba(0,0,0,0.10)'
-  ctx.font = '12px system-ui'
-  ctx.textBaseline = 'top'
+if (SHOW_GRID) {
+    ctx.lineWidth = 1
+    ctx.strokeStyle = 'rgba(0,0,0,0.10)'
+    ctx.font = '12px system-ui'
+    ctx.textBaseline = 'top'
 
-  const drawLabels = !isMoving
-  if (drawLabels) ctx.fillStyle = 'rgba(0,0,0,0.40)'
+    const drawLabels = !isMoving
+    if (drawLabels) ctx.fillStyle = 'rgba(0,0,0,0.40)'
 
-  for (let y = ymin; y <= ymax; y++) {
-    const py = py0 + (y - ymin) * cellPxScreen
-    for (let x = xmin; x <= xmax; x++) {
-      const px = px0 + (x - xmin) * cellPxScreen
-      ctx.strokeRect(px, py, cellPxScreen, cellPxScreen)
-      if (drawLabels) ctx.fillText(`${x},${y}`, px + 6, py + 6)
+    for (let y = ymin; y <= ymax; y++) {
+      const py = py0 + (y - ymin) * cellPxScreen
+      for (let x = xmin; x <= xmax; x++) {
+        const px = px0 + (x - xmin) * cellPxScreen
+        ctx.strokeRect(px, py, cellPxScreen, cellPxScreen)
+        if (drawLabels) ctx.fillText(`${x},${y}`, px + 6, py + 6)
+      }
     }
   }
 }
@@ -606,7 +837,6 @@ function scheduleFrame() {
   if (raf) return
   raf = requestAnimationFrame(() => {
     raf = 0
-    recomputeAnchorPositions()
     drawGrid()
     updateHud()
   })
@@ -639,7 +869,7 @@ async function handleRoutePipeline() {
   hasInitialized = true
 
   await refreshViewport()
-  await refreshInfraMoveEnd() // initial load big pad
+  await refreshInfraMoveEnd()
   await refreshActiveCellIfNeeded()
   scheduleFrame()
 }
@@ -656,15 +886,16 @@ onMounted(async () => {
   await new Promise(requestAnimationFrame)
 
   const containerWidth = mapEl.value.getBoundingClientRect().width
-  const isMobile = containerWidth < 768
+
   const TILE_PX = WORLD.cellPx
   const paddingPx = 32
 
   const INITIAL_MOBILE_SCALE = 0.75
+  const isMobile = window.matchMedia('(pointer: coarse)').matches
 
-const lockedZoom = isMobile
-  ? Math.log2(containerWidth / ((2 * TILE_PX) + paddingPx)) + Math.log2(INITIAL_MOBILE_SCALE)
-  : 0
+  const lockedZoom = isMobile
+    ? Math.log2(containerWidth / ((2 * TILE_PX) + paddingPx)) + Math.log2(INITIAL_MOBILE_SCALE)
+    : 0
 
   map = L.map(mapEl.value, {
     crs: L.CRS.Simple,
@@ -704,20 +935,21 @@ const lockedZoom = isMobile
   })
   ro.observe(mapEl.value)
 
+  // init patterns after ctx exists
+  gravelPattern = makeGravelPattern()
+  brickPattern = makeBrickPattern()
+
   map.on('movestart', () => {
     didMoveSinceDown = true
     isMoving = true
   })
 
-  // BEST: render every frame; fetch infra while moving (throttled)
   map.on('move', () => {
     scheduleFrame()
     requestInfraWhileMoving()
   })
 
-  // On moveend: fetch anchors + bigger infra prefetch
-map.on('moveend', async () => {
-    // prevent a late throttled "move" fetch from firing after moveend
+  map.on('moveend', async () => {
     if (infraMoveTimer) clearTimeout(infraMoveTimer)
     infraMoveTimer = 0
     infraMoveScheduled = false
@@ -777,9 +1009,9 @@ onBeforeUnmount(() => {
   ro?.disconnect()
   map?.remove()
   map = null
-  anchorLayerPos.clear()
-})
 
+  anchorCache.clear()
+})
 </script>
 
 <style scoped>
