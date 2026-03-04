@@ -660,9 +660,11 @@ onMounted(async () => {
   const TILE_PX = WORLD.cellPx
   const paddingPx = 32
 
-  const lockedZoom = isMobile
-    ? Math.log2(containerWidth / ((2 * TILE_PX) + paddingPx))
-    : 0
+  const INITIAL_MOBILE_SCALE = 0.75
+
+const lockedZoom = isMobile
+  ? Math.log2(containerWidth / ((2 * TILE_PX) + paddingPx)) + Math.log2(INITIAL_MOBILE_SCALE)
+  : 0
 
   map = L.map(mapEl.value, {
     crs: L.CRS.Simple,
