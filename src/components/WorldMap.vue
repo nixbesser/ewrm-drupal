@@ -13,6 +13,7 @@
         :style="tileStyle(t)"
         @click.stop="onTileClick(t)"
       >
+        <!-- PASS activeCell ONLY to the active tile -->
         <TileAnchor
           :tile="t"
           :flipped="isFlipped(t)"
@@ -29,7 +30,7 @@
       <div>anchors: {{ anchors.length }}</div>
       <div>pendingNavSource: {{ hud.nav }}</div>
       <div>lastErr: {{ hud.err }}</div>
-      <div>infra(nonzero): {{ infraCount }}</div>
+      <div>infra: {{ infraTiles.length }}</div>
       <div>activeCell: {{ activeCell ? 'yes' : 'no' }}</div>
     </div>
   </div>
@@ -42,25 +43,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { fetchViewport, fetchCell, resolveObject } from '../api/worldApi'
 import TileAnchor from './TileAnchor.vue'
 
-/**
- * BEST UX SETTINGS
- * - Render on every move via RAF (drag + inertia)
- * - Fetch infra progressively while moving (throttled + abortable + deduped)
- */
-const WORLD = { z: 10, cols: 1024, rows: 1024, cellPx: 256 }
+const WORLD = { z: 10, cols: 1024, rows: 1024, cellPx: 256, pad: 2 }
 const BACKEND_Y_IS_BOTTOM_ORIGIN = false
-
-// Fetch radii (pads):
-const PAD_ANCHORS = 2
-const PAD_INFRA_MOVE = 16   // prefetch while moving
-const PAD_INFRA_END = 24    // bigger prefetch on moveend
-const PAD_DRAW = 2
-
-// Move fetch throttle (ms)
-const INFRA_MOVE_THROTTLE_MS = 250
-
-// Role encoding (1 byte per tile)
-const ROLE = { NONE: 0, ROAD: 1, YBR: 2, PLAZA: 3 }
 
 const mapEl = ref(null)
 const gridCanvasEl = ref(null)
@@ -78,19 +62,17 @@ const route = useRoute()
 const router = useRouter()
 
 const flippedKey = ref(null)
+const infraTiles = ref([]) // [{x,y,role}]
 
-// 1024*1024 = 1,048,576 bytes (~1MB)
-const infraGrid = new Uint8Array(WORLD.cols * WORLD.rows)
-const infraCount = ref(0) // HUD-only: count of non-zero cells
-
-// ACTIVE CELL payload
+// ACTIVE CELL (full object payload for tabs) — only when active + flipped
 const activeCell = ref(null)
 let cellAbort = null
 
+// Deep links should center; click-open should NOT.
 let hasInitialized = false
 let didMoveSinceDown = false
+
 let pendingNavSource = null // 'click' | null
-let isMoving = false
 
 const hud = reactive({
   tb: '—',
@@ -137,53 +119,6 @@ function latLngToTileXY(latlng) {
   return { x, y }
 }
 
-/* ===== infra helpers ===== */
-
-function idxOf(x, yUi) {
-  return (yUi * WORLD.cols) + x
-}
-
-function roleToByte(role) {
-  if (role === 'ybr') return ROLE.YBR
-  if (role === 'road') return ROLE.ROAD
-  if (role === 'plaza') return ROLE.PLAZA
-  return ROLE.NONE
-}
-
-/**
- * Rect in UI tile coords
- */
-function tileBoundsWithPad_UI(pad) {
-  if (!map) return { xmin: 0, xmax: 0, ymin: 0, ymax: 0 }
-
-  const size = map.getSize()
-  const tl = map.containerPointToLatLng([0, 0])
-  const br = map.containerPointToLatLng([size.x, size.y])
-
-  const a = latLngToTileXY(tl)
-  const b = latLngToTileXY(br)
-
-  let xmin = Math.min(a.x, b.x)
-  let xmax = Math.max(a.x, b.x)
-  let ymin = Math.min(a.y, b.y)
-  let ymax = Math.max(a.y, b.y)
-
-  xmin = clamp(xmin - pad, 0, WORLD.cols - 1)
-  xmax = clamp(xmax + pad, 0, WORLD.cols - 1)
-  ymin = clamp(ymin - pad, 0, WORLD.rows - 1)
-  ymax = clamp(ymax + pad, 0, WORLD.rows - 1)
-
-  return { xmin, xmax, ymin, ymax }
-}
-
-function boundsToRect(bounds) {
-  const x = bounds.xmin
-  const y = bounds.ymin
-  const w = (bounds.xmax - bounds.xmin) + 1
-  const h = (bounds.ymax - bounds.ymin) + 1
-  return { x, y, w, h }
-}
-
 /* ===== active / flip ===== */
 
 function activeKeyFromRoute() {
@@ -202,19 +137,28 @@ function isFlipped(t) {
   return flippedKey.value === `${t.x}:${t.y}`
 }
 
+/**
+ * UX:
+ * - Click active tile toggles flip
+ * - Click other tile activates + flips immediately (single click transfer)
+ * - No centering on click
+ */
 async function handleTileClick(t) {
   if (didMoveSinceDown) return
 
   const k = `${t.x}:${t.y}`
   const activeK = activeKeyFromRoute()
 
+  // Clicking active tile toggles flip
   if (activeK === k) {
     flippedKey.value = flippedKey.value === k ? null : k
     await refreshActiveCellIfNeeded()
     return
   }
 
+  // Clicking a different tile -> activate AND open immediately
   flippedKey.value = k
+
   pendingNavSource = 'click'
   router.push({ name: 'tile', params: { z: WORLD.z, x: t.x, y: t.y } })
 }
@@ -232,6 +176,7 @@ function mountAnchorsIntoPane() {
 
   const paneName = 'ewrmAnchors'
   const pane = map.getPane(paneName) || map.createPane(paneName)
+
   pane.style.zIndex = '600'
   pane.style.pointerEvents = 'none'
   pane.appendChild(el)
@@ -244,9 +189,12 @@ function mountAnchorsIntoPane() {
   el.style.pointerEvents = 'none'
 }
 
+/* ===== anchors in pane (layer points) ===== */
+
 function recomputeAnchorPositions() {
   if (!map) return
   anchorLayerPos.clear()
+
   for (const t of anchors.value) {
     const lp = map.latLngToLayerPoint(tileTopLeftLatLng(t.x, t.y))
     anchorLayerPos.set(`${t.x}:${t.y}`, { x: lp.x, y: lp.y })
@@ -269,21 +217,93 @@ function tileStyle(t) {
   }
 }
 
+/* ===== viewport bounds ===== */
+
+function currentTileBoundsWithPad_UI() {
+  if (!map) return { xmin: 0, xmax: 0, ymin: 0, ymax: 0 }
+
+  const size = map.getSize()
+  const tl = map.containerPointToLatLng([0, 0])
+  const br = map.containerPointToLatLng([size.x, size.y])
+
+  const a = latLngToTileXY(tl)
+  const b = latLngToTileXY(br)
+
+  let xmin = Math.min(a.x, b.x)
+  let xmax = Math.max(a.x, b.x)
+  let ymin = Math.min(a.y, b.y)
+  let ymax = Math.max(a.y, b.y)
+
+  xmin = clamp(xmin - WORLD.pad, 0, WORLD.cols - 1)
+  xmax = clamp(xmax + WORLD.pad, 0, WORLD.cols - 1)
+  ymin = clamp(ymin - WORLD.pad, 0, WORLD.rows - 1)
+  ymax = clamp(ymax + WORLD.pad, 0, WORLD.rows - 1)
+
+  return { xmin, xmax, ymin, ymax }
+}
+
+function boundsToRect(bounds) {
+  const x = bounds.xmin
+  const y = bounds.ymin
+  const w = (bounds.xmax - bounds.xmin) + 1
+  const h = (bounds.ymax - bounds.ymin) + 1
+  return { x, y, w, h }
+}
+
 function updateHud() {
   if (!map) return
-  const tb = tileBoundsWithPad_UI(PAD_DRAW)
+  const tb = currentTileBoundsWithPad_UI()
   const c = latLngToTileXY(map.getCenter())
 
   hud.tb = `${tb.xmin}..${tb.xmax}, ${tb.ymin}..${tb.ymax}`
   hud.ct = `${c.x},${c.y}`
-  hud.route =
-    route.name === 'tile'
-      ? `/w/10/${route.params.x}/${route.params.y}`
-      : String(route.fullPath)
+  hud.route = route.name === 'tile'
+    ? `/w/10/${route.params.x}/${route.params.y}`
+    : String(route.fullPath)
   hud.nav = pendingNavSource || '—'
 }
 
-/* ===== API: anchors ===== */
+/* ===== API ===== */
+
+let infraAbort = null
+
+async function refreshInfra() {
+  if (!map) return
+
+  try { infraAbort?.abort() } catch (_) {}
+  infraAbort = new AbortController()
+
+  const ui = currentTileBoundsWithPad_UI()
+  const by1 = uiYToBackendY(ui.ymin)
+  const by2 = uiYToBackendY(ui.ymax)
+  const yminBackend = Math.min(by1, by2)
+  const ymaxBackend = Math.max(by1, by2)
+
+  const qs = new URLSearchParams({
+    z: String(WORLD.z),
+    xmin: String(ui.xmin),
+    xmax: String(ui.xmax),
+    ymin: String(yminBackend),
+    ymax: String(ymaxBackend),
+  })
+
+  try {
+    const res = await fetch(`/api/world/infra?${qs.toString()}`, {
+      signal: infraAbort.signal,
+    })
+    const data = await res.json()
+
+    infraTiles.value = data.map(t => ({
+      x: Number(t.x),
+      y: backendYToUiY(Number(t.y)),
+      role: t.role,
+    }))
+  } catch (err) {
+    if (err?.name === 'AbortError') return
+    hud.err = String(err?.message || err)
+    console.error(err)
+  }
+}
 
 async function refreshViewport() {
   if (!map) return
@@ -291,7 +311,7 @@ async function refreshViewport() {
   try { viewportAbort?.abort() } catch (_) {}
   viewportAbort = new AbortController()
 
-  const ui = tileBoundsWithPad_UI(PAD_ANCHORS)
+  const ui = currentTileBoundsWithPad_UI()
 
   const by1 = uiYToBackendY(ui.ymin)
   const by2 = uiYToBackendY(ui.ymax)
@@ -315,6 +335,7 @@ async function refreshViewport() {
       const x = Number(t.x)
       const yBackend = Number(t.y)
       const yUi = backendYToUiY(yBackend)
+
       return {
         x,
         y: yUi,
@@ -334,125 +355,11 @@ async function refreshViewport() {
   }
 }
 
-/* ===== API: infra (best) ===== */
-
 /**
- * Dedup infra fetches using "covered rects".
- * This prevents spamming the backend while panning around the same area.
+ * Fetch full cell payload only when:
+ * - current route is a tile, AND
+ * - that tile is flipped
  */
-const infraFetchedRects = [] // {xmin,xmax,ymin,ymax} in UI coords
-
-function rectCovers(a, b) {
-  return a.xmin <= b.xmin && a.xmax >= b.xmax && a.ymin <= b.ymin && a.ymax >= b.ymax
-}
-
-function alreadyFetched(rect) {
-  // If ANY prior rect fully covers this, we can skip
-  return infraFetchedRects.some(r => rectCovers(r, rect))
-}
-
-function rememberFetched(rect) {
-  infraFetchedRects.push(rect)
-  // Optional: cap list to keep it bounded
-  if (infraFetchedRects.length > 80) infraFetchedRects.splice(0, 20)
-}
-
-let infraMoveTimer = 0
-let infraMoveScheduled = false
-
-async function refreshInfraForRect_UI(uiRect) {
-  if (!map) return
-  if (alreadyFetched(uiRect)) return
-
-  // Convert UI y bounds to backend y bounds safely
-  const by1 = uiYToBackendY(uiRect.ymin)
-  const by2 = uiYToBackendY(uiRect.ymax)
-  const yminBackend = Math.min(by1, by2)
-  const ymaxBackend = Math.max(by1, by2)
-
-  const qs = new URLSearchParams({
-    z: String(WORLD.z),
-    xmin: String(uiRect.xmin),
-    xmax: String(uiRect.xmax),
-    ymin: String(yminBackend),
-    ymax: String(ymaxBackend),
-  })
-
-  const res = await fetch(`/api/world/infra?${qs.toString()}`, {
-    headers: { Accept: 'application/json' },
-  })
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '')
-    throw new Error(`infra HTTP ${res.status}: ${txt.slice(0, 120)}`)
-  }
-
-  const ct = res.headers.get('content-type') || ''
-  if (!ct.includes('application/json')) {
-    const txt = await res.text().catch(() => '')
-    throw new Error(`infra not JSON (ct=${ct}) ${txt.slice(0, 120)}`)
-  }
-
-  const data = await res.json()
-
-  // Merge into Uint8Array
-  for (const t of data) {
-    const x = Number(t.x)
-    const yUi = backendYToUiY(Number(t.y))
-    if (!Number.isFinite(x) || !Number.isFinite(yUi)) continue
-    if (x < 0 || x >= WORLD.cols || yUi < 0 || yUi >= WORLD.rows) continue
-
-    const idx = idxOf(x, yUi)
-    const prev = infraGrid[idx]
-    const next = roleToByte(t.role)
-
-    if (prev === ROLE.NONE && next !== ROLE.NONE) infraCount.value++
-    else if (prev !== ROLE.NONE && next === ROLE.NONE) infraCount.value--
-
-    infraGrid[idx] = next
-  }
-
-  rememberFetched(uiRect)
-}
-
-function requestInfraWhileMoving() {
-  if (!map) return
-  if (infraMoveScheduled) return
-  infraMoveScheduled = true
-
-  infraMoveTimer = window.setTimeout(async () => {
-    infraMoveScheduled = false
-    if (!map) return
-
-    // While moving, fetch smaller pad, but more frequently
-    const ui = tileBoundsWithPad_UI(PAD_INFRA_MOVE)
-
-    try {
-      await refreshInfraForRect_UI(ui)
-      scheduleFrame() // show newly merged infra ASAP
-    } catch (err) {
-      if (err?.name === 'AbortError') return
-      hud.err = String(err?.message || err)
-      console.error(err)
-    }
-  }, INFRA_MOVE_THROTTLE_MS)
-}
-
-async function refreshInfraMoveEnd() {
-  if (!map) return
-  const ui = tileBoundsWithPad_UI(PAD_INFRA_END)
-
-  try {
-    await refreshInfraForRect_UI(ui)
-  } catch (err) {
-    if (err?.name === 'AbortError') return
-    hud.err = String(err?.message || err)
-    console.error(err)
-  }
-}
-
-/* ===== active cell ===== */
-
 async function refreshActiveCellIfNeeded() {
   if (route.name !== 'tile') {
     activeCell.value = null
@@ -473,6 +380,7 @@ async function refreshActiveCellIfNeeded() {
   cellAbort = new AbortController()
 
   try {
+    // worldApi.js must support full=1 -> /api/world/cell?...&full=1
     const data = await fetchCell(
       { x, y: yBackend, full: 1 },
       { signal: cellAbort.signal }
@@ -549,55 +457,42 @@ function drawGrid() {
   const h = canvas.clientHeight
 
   ctx.clearRect(0, 0, w, h)
-
-  const s = screenScale()
-  const cellPxScreen = WORLD.cellPx * s
-
-  const { xmin, xmax, ymin, ymax } = tileBoundsWithPad_UI(PAD_DRAW)
-
-  // Affine mapping: one projection call, then linear offsets
-  const p0 = map.latLngToContainerPoint(tileTopLeftLatLng(xmin, ymin))
-  const px0 = Math.round(p0.x)
-  const py0 = Math.round(p0.y)
-
-  // infra
-  for (let y = ymin; y <= ymax; y++) {
-    const py = py0 + (y - ymin) * cellPxScreen
-    const rowBase = y * WORLD.cols
-    for (let x = xmin; x <= xmax; x++) {
-      const role = infraGrid[rowBase + x]
-      if (role === ROLE.NONE) continue
-
-      const px = px0 + (x - xmin) * cellPxScreen
-
-      if (role === ROLE.YBR) {
-        ctx.fillStyle = 'rgba(244, 197, 66, 0.85)'
-        ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
-      } else if (role === ROLE.ROAD) {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.12)'
-        ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
-      } else if (role === ROLE.PLAZA) {
-        ctx.fillStyle = 'rgba(90, 90, 90, 0.10)'
-        ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
-      }
-    }
-  }
-
-  // grid (labels optional; keep off while moving for FPS)
   ctx.lineWidth = 1
   ctx.strokeStyle = 'rgba(0,0,0,0.10)'
+  ctx.fillStyle = 'rgba(0,0,0,0.40)'
   ctx.font = '12px system-ui'
   ctx.textBaseline = 'top'
 
-  const drawLabels = !isMoving
-  if (drawLabels) ctx.fillStyle = 'rgba(0,0,0,0.40)'
+  const s = screenScale()
+  const cellPxScreen = WORLD.cellPx * s
+  const { xmin, xmax, ymin, ymax } = currentTileBoundsWithPad_UI()
 
+  // infra first
+  for (const t of infraTiles.value) {
+    if (t.x < xmin || t.x > xmax || t.y < ymin || t.y > ymax) continue
+    const p = map.latLngToContainerPoint(tileTopLeftLatLng(t.x, t.y))
+    const px = Math.round(p.x)
+    const py = Math.round(p.y)
+
+    if (t.role === 'ybr') {
+      ctx.fillStyle = 'rgba(244, 197, 66, 0.85)'
+      ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+    } else if (t.role === 'road') {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.12)'
+      ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+    }
+  }
+
+  // grid + labels
+  ctx.strokeStyle = 'rgba(0,0,0,0.10)'
+  ctx.fillStyle = 'rgba(0,0,0,0.40)'
   for (let y = ymin; y <= ymax; y++) {
-    const py = py0 + (y - ymin) * cellPxScreen
     for (let x = xmin; x <= xmax; x++) {
-      const px = px0 + (x - xmin) * cellPxScreen
+      const p = map.latLngToContainerPoint(tileTopLeftLatLng(x, y))
+      const px = Math.round(p.x)
+      const py = Math.round(p.y)
       ctx.strokeRect(px, py, cellPxScreen, cellPxScreen)
-      if (drawLabels) ctx.fillText(`${x},${y}`, px + 6, py + 6)
+      ctx.fillText(`${x},${y}`, px + 6, py + 6)
     }
   }
 }
@@ -628,6 +523,7 @@ async function handleRoutePipeline() {
     await centerDeepLinkIfNeeded()
   }
 
+  // Auto-open on deep-link (NOT clicks)
   if (source !== 'click' && route.name === 'tile') {
     const rx = Number(route.params.x)
     const ry = Number(route.params.y)
@@ -639,7 +535,7 @@ async function handleRoutePipeline() {
   hasInitialized = true
 
   await refreshViewport()
-  await refreshInfraMoveEnd() // initial load big pad
+  await refreshInfra()
   await refreshActiveCellIfNeeded()
   scheduleFrame()
 }
@@ -653,24 +549,30 @@ onMounted(async () => {
   const worldHeight = WORLD.rows * WORLD.cellPx
   const bounds = L.latLngBounds([0, 0], [-worldHeight, worldWidth])
 
+  // wait a frame so container has real size
   await new Promise(requestAnimationFrame)
 
   const containerWidth = mapEl.value.getBoundingClientRect().width
   const isMobile = containerWidth < 768
+
   const TILE_PX = WORLD.cellPx
   const paddingPx = 32
 
+  // fit 2 tiles across on mobile
   const lockedZoom = isMobile
     ? Math.log2(containerWidth / ((2 * TILE_PX) + paddingPx))
     : 0
 
   map = L.map(mapEl.value, {
     crs: L.CRS.Simple,
+
     zoomSnap: 0,
     zoomDelta: 0.25,
+
     zoom: lockedZoom,
     minZoom: lockedZoom,
     maxZoom: lockedZoom,
+
     dragging: true,
     inertia: true,
     inertiaThreshold: 0,
@@ -678,6 +580,7 @@ onMounted(async () => {
     inertiaMaxSpeed: 3500,
     easeLinearity: 0.12,
     maxBoundsViscosity: 0.5,
+
     zoomControl: false,
     attributionControl: false,
     scrollWheelZoom: false,
@@ -685,6 +588,7 @@ onMounted(async () => {
     touchZoom: false,
     boxZoom: false,
     keyboard: false,
+
     zoomAnimation: false,
     fadeAnimation: false,
     markerZoomAnimation: false,
@@ -702,38 +606,22 @@ onMounted(async () => {
   })
   ro.observe(mapEl.value)
 
-  map.on('movestart', () => {
-    didMoveSinceDown = true
-    isMoving = true
-  })
+  map.on('movestart', () => { didMoveSinceDown = true })
 
-  // BEST: render every frame; fetch infra while moving (throttled)
-  map.on('move', () => {
-    scheduleFrame()
-    requestInfraWhileMoving()
-  })
-
-  // On moveend: fetch anchors + bigger infra prefetch
-map.on('moveend', async () => {
-    // prevent a late throttled "move" fetch from firing after moveend
-    if (infraMoveTimer) clearTimeout(infraMoveTimer)
-    infraMoveTimer = 0
-    infraMoveScheduled = false
-
+  map.on('moveend', async () => {
     setTimeout(() => { didMoveSinceDown = false }, 0)
-
-    try {
-      await refreshViewport()
-      await refreshInfraMoveEnd()
-      await refreshActiveCellIfNeeded()
-    } finally {
-      isMoving = false
-      scheduleFrame()
-    }
+    await refreshViewport()
+    await refreshInfra()
+    await refreshActiveCellIfNeeded()
+    scheduleFrame()
   })
 
+  map.on('move', scheduleFrame)
+
+  // Background click -> route, but do NOT center
   map.on('click', (e) => {
     if (didMoveSinceDown) return
+
     const target = e.originalEvent?.target
     if (target && target.closest && target.closest('.tile-shell')) return
 
@@ -757,33 +645,40 @@ watch(
   () => handleRoutePipeline().catch(console.error)
 )
 
+// When flip state changes, fetch/unfetch activeCell as needed.
 watch(
   () => flippedKey.value,
   () => refreshActiveCellIfNeeded()
 )
 
 onBeforeUnmount(() => {
+  try { infraAbort?.abort() } catch (_) {}
   try { cellAbort?.abort() } catch (_) {}
-  try { viewportAbort?.abort() } catch (_) {}
-
-  if (infraMoveTimer) clearTimeout(infraMoveTimer)
-  infraMoveTimer = 0
-  infraMoveScheduled = false
 
   if (raf) cancelAnimationFrame(raf)
-
+  try { viewportAbort?.abort() } catch (_) {}
   ro?.disconnect()
   map?.remove()
   map = null
   anchorLayerPos.clear()
 })
-
 </script>
 
 <style scoped>
-.wrap { position: relative; width: 100vw; height: 100vh; }
-.map { width: 100%; height: 100%; }
-:deep(.leaflet-container) { background: #eee; }
+.wrap {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+}
+
+.map {
+  width: 100%;
+  height: 100%;
+}
+
+:deep(.leaflet-container) {
+  background: #eee;
+}
 
 .grid-canvas {
   position: absolute;
