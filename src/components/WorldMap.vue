@@ -300,6 +300,7 @@ async function handleTileClick(t) {
 }
 
 function onTileClick(t) {
+  if (t?.flippable === false) return
   handleTileClick(t)
 }
 
@@ -508,7 +509,7 @@ function tileStyle(t) {
       transform: `translate3d(${Math.round(px)}px, ${Math.round(py)}px, 0)`,
       width: `${Math.round(w)}px`,
       height: `${Math.round(h)}px`,
-      pointerEvents: 'auto',
+      pointerEvents: t?.flippable === false ? 'none' : 'auto',
     }
   }
 
