@@ -67,8 +67,12 @@ export function fetchViewport(params, options = {}) {
   throw new Error('fetchViewport: expected {x,y,w,h}');
 }
 
-export function fetchCell({ x, y }, options = {}) {
-  return getJson(`${BASE}/api/world/cell?${qs({ x, y })}`, options);
+export function fetchCell(params, options = {}) {
+  if (params?.x === undefined || params?.y === undefined) {
+    throw new Error('fetchCell: expected {x,y}')
+  }
+  // Pass through extra flags like full=1
+  return getJson(`${BASE}/api/world/cell?${qs(params)}`, options)
 }
 
 export function resolveObject({ bundle, slug }, options = {}) {

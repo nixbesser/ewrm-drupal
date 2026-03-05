@@ -10,65 +10,146 @@
       </section>
 
       <!-- BACK -->
-      <section class="face back">
+      <section class="face back" @click.stop>
         <div class="back__chrome">
           <div class="back__title">{{ backTitle }}</div>
 
-          <!-- MEDIA (if available) -->
-          <div class="back__media" v-if="mediaUrl">
-            <div v-if="embedState.status === 'idle'" class="back__hint">
-              Flip to load media.
-            </div>
-
-            <div v-else-if="embedState.status === 'loading'" class="back__loading">
-              Loading embed…
-            </div>
-
-            <div v-else-if="embedState.status === 'error'" class="back__error">
-              <div><strong>Embed error</strong></div>
-              <div class="back__errorMsg">{{ embedState.error }}</div>
-              <button class="back__btn" type="button" @click.stop="reloadEmbed">
-                Retry
-              </button>
-            </div>
-
-            <div
-              v-else-if="embedState.status === 'ready' && embedState.embed?.iframe_src"
-              class="embed"
+          <!-- TABS -->
+          <nav class="tabs" aria-label="Tile tabs">
+            <button
+              class="tab"
+              :class="{ active: activeTab === 'cover' }"
+              type="button"
+              @click.stop="onCoverTab"
             >
-              <iframe
-                class="embed__frame"
-                :src="embedState.embed.iframe_src"
-                :style="{ height: iframeHeight + 'px' }"
-                allowfullscreen
-                loading="lazy"
-                referrerpolicy="strict-origin-when-cross-origin"
-              ></iframe>
+              Cover
+            </button>
 
-              <div
-                class="embed__meta"
-                v-if="embedState.embed?.meta?.title || embedState.embed?.meta?.site"
-              >
-                <div class="embed__title">{{ embedState.embed?.meta?.title }}</div>
-                <div class="embed__site">{{ embedState.embed?.meta?.site }}</div>
+            <button
+              class="tab"
+              :class="{ active: activeTab === 'embed' }"
+              :disabled="!embedUrl"
+              type="button"
+              @click.stop="setTab('embed')"
+            >
+              Embed
+            </button>
+
+            <button
+              class="tab"
+              :class="{ active: activeTab === 'description' }"
+              :disabled="!descriptionText"
+              type="button"
+              @click.stop="setTab('description')"
+            >
+              Description
+            </button>
+
+            <button
+              class="tab"
+              :class="{ active: activeTab === 'links' }"
+              :disabled="links.length === 0"
+              type="button"
+              @click.stop="setTab('links')"
+            >
+              Links
+            </button>
+          </nav>
+
+          <!-- PANELS -->
+          <div class="panel">
+            <!-- EMBED -->
+            <div v-if="activeTab === 'embed'" class="panel__body">
+              <div v-if="!embedUrl" class="back__hint">No embed_url yet.</div>
+
+              <div v-else>
+                <div v-if="embedState.status === 'idle'" class="back__hint">
+                  Flip to load embed.
+                </div>
+
+                <div v-else-if="embedState.status === 'loading'" class="back__loading">
+                  Loading embed…
+                </div>
+
+                <div v-else-if="embedState.status === 'error'" class="back__error">
+                  <div><strong>Embed error</strong></div>
+                  <div class="back__errorMsg">{{ embedState.error }}</div>
+                  <button class="back__btn" type="button" @click.stop="reloadEmbed">
+                    Retry
+                  </button>
+                </div>
+
+                <div
+                  v-else-if="embedState.status === 'ready' && embedState.embed?.iframe_src"
+                  class="embed"
+                >
+                  <iframe
+                    class="embed__frame"
+                    :src="embedState.embed.iframe_src"
+                    :style="{ height: iframeHeight + 'px' }"
+                    allowfullscreen
+                    loading="lazy"
+                    referrerpolicy="strict-origin-when-cross-origin"
+                  ></iframe>
+
+                  <div
+                    class="embed__meta"
+                    v-if="embedState.embed?.meta?.title || embedState.embed?.meta?.site"
+                  >
+                    <div class="embed__title">{{ embedState.embed?.meta?.title }}</div>
+                    <div class="embed__site">{{ embedState.embed?.meta?.site }}</div>
+                  </div>
+                </div>
+
+                <div v-else class="back__hint">No iframe returned.</div>
               </div>
             </div>
 
-            <div v-else class="back__hint">
-              No iframe returned.
+            <!-- DESCRIPTION -->
+            <div v-else-if="activeTab === 'description'" class="panel__body">
+              <div v-if="descriptionText" class="prose">{{ descriptionText }}</div>
+              <div v-else class="back__hint">No description yet.</div>
+            </div>
+
+            <!-- LINKS -->
+            <div v-else-if="activeTab === 'links'" class="panel__body">
+              <div v-if="links.length" class="links">
+                <a
+                  v-for="l in links"
+                  :key="l.url"
+                  class="link"
+                  :href="l.url"
+                  :target="isExternal(l.url) ? '_blank' : null"
+                  :rel="isExternal(l.url) ? 'noopener' : null"
+                  @click.stop
+                >
+                  <span class="link__label">{{ l.label || hostLabel(l.url) }}</span>
+                  <span class="link__url">{{ prettyUrl(l.url) }}</span>
+                </a>
+              </div>
+              <div v-else class="back__hint">No links yet.</div>
+            </div>
+
+            <!-- COVER (default panel) -->
+            <div v-else class="panel__body">
+              <button class="coverBtn" type="button" @click.stop="emit('request-cover')">
+                Flip to cover
+              </button>
+
+              <div class="back__meta" style="margin-top: 10px;">
+                <div><strong>tile:</strong> {{ tile.x }},{{ tile.y }} ({{ tile.w }}×{{ tile.h }})</div>
+                <div v-if="obj?.bundle && obj?.slug">
+                  <strong>object:</strong> {{ obj.bundle }} · {{ obj.slug }}
+                </div>
+                <div v-else>
+                  <strong>object:</strong> none
+                </div>
+              </div>
             </div>
           </div>
 
-          <!-- FALLBACK (no media url) -->
-          <div v-else class="back__meta">
-            <div><strong>tile:</strong> {{ tile.x }},{{ tile.y }} ({{ tile.w }}×{{ tile.h }})</div>
-            <div v-if="tile.object"><strong>object:</strong> {{ tile.object.bundle }} · {{ tile.object.slug }}</div>
-            <div v-else><strong>object:</strong> none</div>
-            <div class="back__hint">Add song.field_media_url to enable embeds.</div>
-          </div>
-
           <div class="back__footer">
-            Tabs / object view coming next.
+            EWRM · Song tile
           </div>
         </div>
       </section>
@@ -77,19 +158,24 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, reactive, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, watch, ref } from 'vue'
 import { fetchEmbed } from '../api/worldApi'
 
 const props = defineProps({
   tile: { type: Object, required: true },
   flipped: { type: Boolean, default: false },
+  // full cell payload (only provided for active tile)
+  cell: { type: Object, default: null },
 })
+
+const emit = defineEmits(['request-cover'])
 
 /**
  * Shared cache across all TileAnchor instances (module scope).
  * url -> embed payload
  */
-const EMBED_CACHE = globalThis.__EWRM_EMBED_CACHE__ || (globalThis.__EWRM_EMBED_CACHE__ = new Map())
+const EMBED_CACHE =
+  globalThis.__EWRM_EMBED_CACHE__ || (globalThis.__EWRM_EMBED_CACHE__ = new Map())
 
 const embedState = reactive({
   status: 'idle', // 'idle' | 'loading' | 'ready' | 'error'
@@ -99,21 +185,30 @@ const embedState = reactive({
 
 let aborter = null
 
+const activeTab = ref('embed')
+
 const ariaLabel = computed(() => {
   const w = props.tile?.w ?? 1
   const h = props.tile?.h ?? 1
   return `Tile ${props.tile?.x},${props.tile?.y} (${w}×${h})`
 })
 
+/**
+ * Prefer active cell object (full payload) when available.
+ * Fall back to tile.object (preview payload from viewport).
+ */
+const obj = computed(() => props.cell?.object || props.tile?.object || null)
+
 const backTitle = computed(() => {
-  const obj = props.tile?.object
-  if (obj?.bundle && obj?.slug) return `${obj.bundle}: ${obj.slug}`
+  if (obj.value?.title) return obj.value.title
+  if (obj.value?.name) return obj.value.name
+  if (obj.value?.bundle && obj.value?.slug) return `${obj.value.bundle}: ${obj.value.slug}`
   return 'Tile details'
 })
 
 /**
  * Cover is stored on TILE (not object).
- * Expect tile.cover to be a URL string.
+ * Expect tile.cover to be a URL string (from Drupal Media image derivative / absolute URL).
  */
 const frontStyle = computed(() => {
   const url = props.tile?.cover
@@ -122,13 +217,35 @@ const frontStyle = computed(() => {
 })
 
 /**
- * Song media URL (single).
- * Expose through object preview as object.media_url.
+ * embed_url + embed_start (seconds)
  */
-const mediaUrl = computed(() => {
-  const obj = props.tile?.object
-  const u = obj?.media_url
+const embedUrl = computed(() => {
+  const u = obj.value?.embed_url
   return typeof u === 'string' && u.startsWith('http') ? u : null
+})
+
+const embedStart = computed(() => {
+  const n = Number(obj.value?.embed_start ?? 0)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+})
+
+const descriptionText = computed(() => {
+  const d = obj.value?.description
+  return typeof d === 'string' ? d.trim() : ''
+})
+
+const links = computed(() => {
+  const arr = obj.value?.links
+  if (!Array.isArray(arr)) return []
+  return arr
+    .map((x) => ({
+      label: typeof x?.label === 'string' ? x.label.trim() : '',
+      url:
+        (typeof x?.url === 'string' && x.url.trim()) ||
+        (typeof x?.uri === 'string' && x.uri.trim()) ||
+        '',
+    }))
+    .filter((x) => x.url)
 })
 
 const iframeHeight = computed(() => {
@@ -137,12 +254,6 @@ const iframeHeight = computed(() => {
   return 360
 })
 
-function resetStateToIdle() {
-  embedState.status = 'idle'
-  embedState.embed = null
-  embedState.error = null
-}
-
 function abortInFlight() {
   try {
     aborter?.abort()
@@ -150,8 +261,28 @@ function abortInFlight() {
   aborter = null
 }
 
-async function loadEmbed(url) {
-  if (!url) return
+function resetStateToIdle() {
+  embedState.status = 'idle'
+  embedState.embed = null
+  embedState.error = null
+}
+
+function withStart(url, startSeconds) {
+  if (!startSeconds) return url
+  const hasHash = url.includes('#')
+  const hasQ = url.includes('?')
+  const sep = hasQ ? '&' : '?'
+  if (hasHash) {
+    const [base, hash] = url.split('#')
+    return `${base}${sep}t=${startSeconds}#${hash}`
+  }
+  return `${url}${sep}t=${startSeconds}`
+}
+
+async function loadEmbed(rawUrl) {
+  if (!rawUrl) return
+
+  const url = withStart(rawUrl, embedStart.value)
 
   // Cache hit
   if (EMBED_CACHE.has(url)) {
@@ -186,26 +317,44 @@ async function loadEmbed(url) {
 }
 
 function reloadEmbed() {
-  const url = mediaUrl.value
-  if (!url) return
+  const raw = embedUrl.value
+  if (!raw) return
+  const url = withStart(raw, embedStart.value)
   EMBED_CACHE.delete(url)
-  loadEmbed(url)
+  loadEmbed(raw)
+}
+
+function setTab(id) {
+  activeTab.value = id
+}
+
+function onCoverTab() {
+  // “Cover” means flip back to front immediately.
+  emit('request-cover')
 }
 
 /**
- * Load embed only when flipped becomes true.
- * If user flips away or tile changes, abort.
+ * Lazy embed loading rules:
+ * - only when tile is flipped AND active tab is 'embed' AND embedUrl exists
+ * - abort and reset when unflipped or embedUrl disappears
  */
 watch(
-  () => [props.flipped, mediaUrl.value, props.tile?.object?.id],
-  ([isFlipped, url]) => {
+  () => [props.flipped, activeTab.value, embedUrl.value, embedStart.value, obj.value?.id],
+  ([isFlipped, tab, url]) => {
     if (!url) {
       abortInFlight()
       resetStateToIdle()
+      // if embed_url missing, default to description if available
+      if (descriptionText.value) activeTab.value = 'description'
+      else if (links.value.length) activeTab.value = 'links'
+      else activeTab.value = 'cover'
       return
     }
 
-    if (isFlipped) {
+    // Default tab when opening
+    if (isFlipped && !tab) activeTab.value = 'embed'
+
+    if (isFlipped && tab === 'embed') {
       loadEmbed(url)
     } else {
       abortInFlight()
@@ -218,6 +367,28 @@ watch(
 onBeforeUnmount(() => {
   abortInFlight()
 })
+
+/**
+ * Link helpers
+ */
+function isExternal(u) {
+  return typeof u === 'string' && /^https?:\/\//i.test(u)
+}
+function prettyUrl(u) {
+  try {
+    const url = new URL(u, window.location.origin)
+    return (url.host + url.pathname).replace(/\/$/, '')
+  } catch {
+    return u
+  }
+}
+function hostLabel(u) {
+  try {
+    return new URL(u, window.location.origin).host.replace(/^www\./, '')
+  } catch {
+    return 'Link'
+  }
+}
 </script>
 
 <style scoped>
@@ -307,20 +478,45 @@ onBeforeUnmount(() => {
   letter-spacing: 0.2px;
 }
 
-.back__media {
+.tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-bottom: 2px;
+}
+
+.tab {
+  border: 0;
+  background: rgba(0, 0, 0, 0.06);
+  color: #111;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font: 12px/1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: #111;
+  color: #fff;
+}
+
+.tab:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.panel {
   flex: 1;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  overflow: auto; /* critical: scroll inside tile, not the map */
+  border-radius: 12px;
 }
 
-.back__meta {
-  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "Courier New", monospace;
-  color: rgba(0, 0, 0, 0.72);
+.panel__body {
+  min-height: 100%;
 }
 
+/* Embed visuals reused */
 .back__hint {
   font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   color: rgba(0, 0, 0, 0.55);
@@ -383,6 +579,54 @@ onBeforeUnmount(() => {
   margin-top: 2px;
   font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   color: rgba(0, 0, 0, 0.55);
+}
+
+.prose {
+  font: 13px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: #111;
+  white-space: pre-wrap;
+}
+
+.links {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.link {
+  display: grid;
+  gap: 2px;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.04);
+  text-decoration: none;
+  color: inherit;
+}
+
+.link__label {
+  font: 700 12px/1.2 system-ui;
+  color: #111;
+}
+
+.link__url {
+  font: 12px/1.2 system-ui;
+  color: rgba(0, 0, 0, 0.55);
+}
+
+.coverBtn {
+  border: 0;
+  background: #111;
+  color: #fff;
+  padding: 10px 12px;
+  border-radius: 12px;
+  font: 700 13px/1 system-ui;
+  cursor: pointer;
+}
+
+.back__meta {
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  color: rgba(0, 0, 0, 0.72);
 }
 
 .back__footer {

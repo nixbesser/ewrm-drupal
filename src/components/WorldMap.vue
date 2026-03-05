@@ -17,6 +17,7 @@
           :tile="t"
           :flipped="isFlipped(t)"
           :cell="isActive(t) ? activeCell : null"
+          @request-cover="flippedKey = null"
         />
       </div>
     </div>
