@@ -10,7 +10,7 @@
         :key="`${t.x}:${t.y}`"
         class="tile-shell"
         :data-ddt="t.ddt ? '1' : '0'"
-        :class="{ 'is-active': isActive(t) }"
+        :class="{ 'is-active': isActive(t), 'is-flipped': isFlipped(t) }"
         :style="tileStyle(t)"
         @click.stop="onTileClick(t)"
       >
@@ -994,6 +994,14 @@ function installDDTDragGating() {
   const container = map.getContainer()
 
 ddtPointerDownHandler = (e) => {
+  // If the interaction is inside tile UI, never start map dragging.
+    const noDrag = e.target?.closest?.(
+      '.tile-ui, .tile-tabs, .tile-body, .tile-panel, iframe, a, button, input, textarea, select'
+    )
+    if (noDrag) {
+      map.dragging.disable()
+      return
+    }
     // 1) DDT anchor tiles (Drupal field_ddt)
     const shell = e.target?.closest?.('.tile-shell')
     const isDDTAnchor = !!shell && shell.dataset.ddt === '1'
@@ -1223,6 +1231,10 @@ onBeforeUnmount(() => {
   outline-offset: -4px;
   z-index: 5;
 }
+
+.tile-shell { z-index: 1; }
+.tile-shell.is-active { z-index: 50; }
+.tile-shell.is-flipped { z-index: 100; }
 
 .hud {
   position: fixed;

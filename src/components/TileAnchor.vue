@@ -11,11 +11,12 @@
 
       <!-- BACK -->
       <section class="face back" @click.stop>
-        <div class="back__chrome">
+        <!-- ✅ tile-ui wrapper: used by WorldMap to prevent map-drag when interacting with UI -->
+        <div class="tile-ui back__chrome">
           <div class="back__title">{{ backTitle }}</div>
 
           <!-- TABS -->
-          <nav class="tabs" aria-label="Tile tabs">
+          <nav class="tabs tile-tabs" aria-label="Tile tabs">
             <button
               class="tab"
               :class="{ active: activeTab === 'cover' }"
@@ -57,7 +58,7 @@
           </nav>
 
           <!-- PANELS -->
-          <div class="panel">
+          <div class="panel tile-panel">
             <!-- EMBED -->
             <div v-if="activeTab === 'embed'" class="panel__body">
               <div v-if="!embedUrl" class="back__hint">No embed_url yet.</div>
@@ -107,7 +108,7 @@
 
             <!-- DESCRIPTION -->
             <div v-else-if="activeTab === 'description'" class="panel__body">
-              <div v-if="descriptionText" class="prose">{{ descriptionText }}</div>
+              <div v-if="descriptionText" class="prose tile-body">{{ descriptionText }}</div>
               <div v-else class="back__hint">No description yet.</div>
             </div>
 
@@ -166,9 +167,16 @@ const props = defineProps({
   flipped: { type: Boolean, default: false },
   // full cell payload (only provided for active tile)
   cell: { type: Object, default: null },
+
+  // ✅ controlled tab from parent (WorldMap) for persistence
+  tab: { type: String, default: '' }, // 'cover'|'embed'|'description'|'links' (or '')
 })
 
-const emit = defineEmits(['request-cover'])
+const emit = defineEmits([
+  'request-cover',
+  // ✅ emit to parent for persistence
+  'tab-change',
+])
 
 /**
  * Shared cache across all TileAnchor instances (module scope).
@@ -185,6 +193,7 @@ const embedState = reactive({
 
 let aborter = null
 
+// ✅ local active tab, but kept in sync with parent prop
 const activeTab = ref('embed')
 
 const ariaLabel = computed(() => {
@@ -208,7 +217,6 @@ const backTitle = computed(() => {
 
 /**
  * Cover is stored on TILE (not object).
- * Expect tile.cover to be a URL string (from Drupal Media image derivative / absolute URL).
  */
 const frontStyle = computed(() => {
   const url = props.tile?.cover
@@ -255,9 +263,7 @@ const iframeHeight = computed(() => {
 })
 
 function abortInFlight() {
-  try {
-    aborter?.abort()
-  } catch (_) {}
+  try { aborter?.abort() } catch (_) {}
   aborter = null
 }
 
@@ -326,12 +332,29 @@ function reloadEmbed() {
 
 function setTab(id) {
   activeTab.value = id
+  emit('tab-change', id)
 }
 
 function onCoverTab() {
   // “Cover” means flip back to front immediately.
   emit('request-cover')
+  // Still report the selection to persist state
+  emit('tab-change', 'cover')
 }
+
+/**
+ * Sync activeTab from parent (persistent tab memory).
+ * If parent passes nothing, keep local defaulting behavior.
+ */
+watch(
+  () => props.tab,
+  (t) => {
+    if (typeof t === 'string' && t) {
+      activeTab.value = t
+    }
+  },
+  { immediate: true }
+)
 
 /**
  * Lazy embed loading rules:
@@ -345,14 +368,15 @@ watch(
       abortInFlight()
       resetStateToIdle()
       // if embed_url missing, default to description if available
-      if (descriptionText.value) activeTab.value = 'description'
-      else if (links.value.length) activeTab.value = 'links'
-      else activeTab.value = 'cover'
+      if (descriptionText.value) {
+        if (!props.tab) activeTab.value = 'description'
+      } else if (links.value.length) {
+        if (!props.tab) activeTab.value = 'links'
+      } else {
+        if (!props.tab) activeTab.value = 'cover'
+      }
       return
     }
-
-    // Default tab when opening
-    if (isFlipped && !tab) activeTab.value = 'embed'
 
     if (isFlipped && tab === 'embed') {
       loadEmbed(url)
