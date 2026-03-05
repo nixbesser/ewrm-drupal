@@ -4,27 +4,32 @@
 
     <canvas ref="gridCanvasEl" class="grid-canvas"></canvas>
 
-    <div ref="anchorLayerEl" class="anchor-layer">
-      <div
-        v-for="t in renderAnchors"
-        :key="`${t.x}:${t.y}`"
-        v-memo="[t.x, t.y, t.w, t.h, t.cover, t.flippable, t.ddt, isFlipped(t), isActive(t), tabFor(t)]"
-        class="tile-shell"
-        :data-ddt="t.ddt ? '1' : '0'"
-        :class="{ 'is-active': isActive(t), 'is-flipped': isFlipped(t) }"
-        :style="tileStyle(t)"
-        @click.stop="onTileClick(t)"
-      >
-        <TileAnchor
-          :tile="t"
-          :flipped="isFlipped(t)"
-          :cell="isActive(t) ? activeCell : null"
-          :tab="tabFor(t)"
-          @tab-change="onTabChange(t, $event)"
-          @request-cover="flippedKey = null"
-        />
-      </div>
-    </div>
+ <div ref="anchorLayerEl" class="anchor-layer">
+   <div
+     v-for="t in renderAnchors"
+     :key="`${t.x}:${t.y}`"
+     v-memo="[
+       t.x, t.y, t.w, t.h, t.cover, t.flippable, t.ddt,
+       isFlipped(t), isActive(t), tabFor(t),
+       tabsForTile(t)
+     ]"
+     class="tile-shell"
+     :data-ddt="t.ddt ? '1' : '0'"
+     :class="{ 'is-active': isActive(t), 'is-flipped': isFlipped(t) }"
+     :style="tileStyle(t)"
+     @click.stop="onTileClick(t)"
+   >
+     <TileAnchor
+       :tile="t"
+       :flipped="isFlipped(t)"
+       :cell="isActive(t) ? activeCell : null"
+       :tab="tabFor(t)"
+       :tabs="tabsForTile(t)"
+       @tab-change="onTabChange(t, $event)"
+       @request-cover="flippedKey = null"
+     />
+   </div>
+ </div>
 
     <div class="hud">
       <div><strong>EWRM HUD</strong></div>
@@ -94,10 +99,42 @@ const router = useRouter()
 
 const flippedKey = ref(null)
 
+// --- Tab registry (easy to extend) ---
+const TAB_SETS = {
+  song: [
+    { id: 'cover', label: 'Cover' },
+    { id: 'embed', label: 'Media' },
+    { id: 'description', label: 'Info' },
+    { id: 'links', label: 'Links' },
+  ],
+  default: [
+    { id: 'cover', label: 'Cover' },
+    { id: 'description', label: 'Info' },
+    { id: 'links', label: 'Links' },
+  ],
+}
+
+function bundleForTile(t) {
+  // Prefer activeCell bundle for the active tile.
+  if (isActive(t) && activeCell.value?.object?.bundle) return activeCell.value.object.bundle
+  return t?.object?.bundle || 'default'
+}
+
+function tabsForTile(t) {
+  const b = bundleForTile(t)
+  return TAB_SETS[b] || TAB_SETS.default
+}
+
 // Persist selected tab per tile key ("x:y")
 const tabByKey = reactive(Object.create(null))
 function keyForTile(t) { return `${t.x}:${t.y}` }
-function tabFor(t) { return tabByKey[keyForTile(t)] || 'embed' }
+
+function tabFor(t) {
+  const key = keyForTile(t)
+  const tabs = tabsForTile(t)
+
+  return tabByKey[key] || tabs[0].id
+}
 function onTabChange(t, tab) { tabByKey[keyForTile(t)] = tab }
 
 // Keep the active anchor mounted even if it falls out of viewport anchor list

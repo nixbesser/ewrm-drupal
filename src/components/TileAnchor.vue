@@ -15,45 +15,18 @@
         <div class="tile-ui back__chrome">
           <div class="back__title">{{ backTitle }}</div>
 
-          <!-- TABS -->
+          <!-- TABS (dynamic) -->
           <nav class="tabs tile-tabs" aria-label="Tile tabs">
             <button
+              v-for="tdef in tabDefs"
+              :key="tdef.id"
               class="tab"
-              :class="{ active: activeTab === 'cover' }"
+              :class="{ active: activeTab === tdef.id }"
+              :disabled="isTabDisabled(tdef.id)"
               type="button"
-              @click.stop="onCoverTab"
+              @click.stop="onTabClick(tdef.id)"
             >
-              Cover
-            </button>
-
-            <button
-              class="tab"
-              :class="{ active: activeTab === 'embed' }"
-              :disabled="!embedUrl"
-              type="button"
-              @click.stop="setTab('embed')"
-            >
-              Embed
-            </button>
-
-            <button
-              class="tab"
-              :class="{ active: activeTab === 'description' }"
-              :disabled="!descriptionText"
-              type="button"
-              @click.stop="setTab('description')"
-            >
-              Description
-            </button>
-
-            <button
-              class="tab"
-              :class="{ active: activeTab === 'links' }"
-              :disabled="links.length === 0"
-              type="button"
-              @click.stop="setTab('links')"
-            >
-              Links
+              {{ tdef.label }}
             </button>
           </nav>
 
@@ -170,6 +143,10 @@ const props = defineProps({
 
   // ✅ controlled tab from parent (WorldMap) for persistence
   tab: { type: String, default: '' }, // 'cover'|'embed'|'description'|'links' (or '')
+
+  // ✅ dynamic tabs from parent (bundle-driven)
+  // [{ id: 'embed', label: 'Media' }, ...]
+  tabs: { type: Array, default: () => [] },
 })
 
 const emit = defineEmits([
@@ -262,6 +239,27 @@ const iframeHeight = computed(() => {
   return 360
 })
 
+/**
+ * Tabs: if parent provides a set, use it. Otherwise fallback to a safe default.
+ */
+const tabDefs = computed(() => {
+  return props.tabs && props.tabs.length
+    ? props.tabs
+    : [
+        { id: 'cover', label: 'Cover' },
+        { id: 'embed', label: 'Media' },
+        { id: 'description', label: 'Info' },
+        { id: 'links', label: 'Links' },
+      ]
+})
+
+function isTabDisabled(id) {
+  if (id === 'embed') return !embedUrl.value
+  if (id === 'description') return !descriptionText.value
+  if (id === 'links') return links.value.length === 0
+  return false
+}
+
 function abortInFlight() {
   try { aborter?.abort() } catch (_) {}
   aborter = null
@@ -342,15 +340,35 @@ function onCoverTab() {
   emit('tab-change', 'cover')
 }
 
+function onTabClick(id) {
+  if (id === 'cover') onCoverTab()
+  else setTab(id)
+}
+
 /**
  * Sync activeTab from parent (persistent tab memory).
- * If parent passes nothing, keep local defaulting behavior.
  */
 watch(
   () => props.tab,
   (t) => {
     if (typeof t === 'string' && t) {
       activeTab.value = t
+    }
+  },
+  { immediate: true }
+)
+
+/**
+ * If tabs set changes and the current activeTab is no longer present,
+ * fall back to the first available enabled tab.
+ */
+watch(
+  () => tabDefs.value,
+  () => {
+    const ids = new Set(tabDefs.value.map((d) => d.id))
+    if (!ids.has(activeTab.value)) {
+      const first = tabDefs.value.find((d) => !isTabDisabled(d.id)) || tabDefs.value[0]
+      if (first?.id) setTab(first.id === 'cover' ? 'embed' : first.id) // don't auto-flip to cover
     }
   },
   { immediate: true }
@@ -367,13 +385,12 @@ watch(
     if (!url) {
       abortInFlight()
       resetStateToIdle()
-      // if embed_url missing, default to description if available
-      if (descriptionText.value) {
-        if (!props.tab) activeTab.value = 'description'
-      } else if (links.value.length) {
-        if (!props.tab) activeTab.value = 'links'
-      } else {
-        if (!props.tab) activeTab.value = 'cover'
+
+      // If no embed_url, pick a sensible default locally only if parent isn't controlling
+      if (!props.tab) {
+        if (descriptionText.value) activeTab.value = 'description'
+        else if (links.value.length) activeTab.value = 'links'
+        else activeTab.value = 'cover'
       }
       return
     }
