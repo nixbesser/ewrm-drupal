@@ -114,21 +114,6 @@ function screenScale() {
   return map ? map.getZoomScale(map.getZoom(), 0) : 1
 }
 
-// Cached effective tile size in layer pixels (updated once per frame)
-let _cellPxLayer = WORLD.cellPx
-
-function cellPxInLayer() {
-  if (!map) return WORLD.cellPx
-
-  const p0 = map.latLngToLayerPoint(tileTopLeftLatLng(0, 0))
-  const p1 = map.latLngToLayerPoint(tileTopLeftLatLng(1, 0))
-  return Math.abs(p1.x - p0.x) || WORLD.cellPx
-}
-
-function updateCellPxLayer() {
-  _cellPxLayer = cellPxInLayer()
-}
-
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v))
 }
@@ -159,8 +144,6 @@ function pruneAnchorsTTL(nowMs) {
     if ((a.lastSeenMs || 0) < cutoff) anchorCache.delete(k)
   }
 }
-
-
 
 /* ===== backend/ui y normalization ===== */
 
@@ -269,7 +252,7 @@ function onTileClick(t) {
   handleTileClick(t)
 }
 
-/* ===== leaflet pane mounting (FIXED) ===== */
+/* ===== leaflet pane mounting ===== */
 
 const ANCHOR_PANE = 'ewrmAnchors'
 
@@ -282,10 +265,10 @@ function mountAnchorsIntoPane() {
   pane.style.zIndex = '600'
   pane.style.pointerEvents = 'none'
 
-  // Put the anchor layer inside the transformed pane (Leaflet owns scaling)
+  // Put anchor layer in the pane so it shares map transforms
   if (el.parentNode !== pane) pane.appendChild(el)
 
-  // This layer is in world pixel space. MUST match world dimensions.
+  // IMPORTANT: world-sized container (avoids mobile layout weirdness)
   const worldW = WORLD.cols * WORLD.cellPx
   const worldH = WORLD.rows * WORLD.cellPx
 
@@ -296,7 +279,6 @@ function mountAnchorsIntoPane() {
   el.style.height = `${worldH}px`
   el.style.pointerEvents = 'none'
 
-  // Safety: if something re-parents it, force it back next frame.
   requestAnimationFrame(() => {
     const el2 = anchorLayerEl.value
     const pane2 = map?.getPane?.(ANCHOR_PANE)
@@ -311,6 +293,42 @@ function anchorsAreInLeafletPane() {
   return el.parentNode === map.getPane(ANCHOR_PANE)
 }
 
+/* ===== Anchor scale + "camera" snapshot (layer space) ===== */
+
+// Measure how many *layer pixels* correspond to 1 tile at current zoom.
+function cellPxInLayer() {
+  if (!map) return WORLD.cellPx
+  const p0 = map.latLngToLayerPoint(tileTopLeftLatLng(0, 0))
+  const p1 = map.latLngToLayerPoint(tileTopLeftLatLng(1, 0))
+  return Math.abs(p1.x - p0.x) || WORLD.cellPx
+}
+
+// Layer-space camera snapshot (computed once per frame)
+const camL = {
+  xmin: 0,
+  ymin: 0,
+  px0: 0,
+  py0: 0,
+  cell: WORLD.cellPx,
+}
+
+function updateAnchorCameraLayer() {
+  if (!map) return
+
+  // top-left visible tile (no pad)
+  const ui = tileBoundsWithPad_UI(0)
+  camL.xmin = ui.xmin
+  camL.ymin = ui.ymin
+
+  // origin in layer pixels for that tile
+  const p0 = map.latLngToLayerPoint(tileTopLeftLatLng(ui.xmin, ui.ymin))
+  camL.px0 = p0.x
+  camL.py0 = p0.y
+
+  // effective tile size in layer pixels (mobile-safe)
+  camL.cell = cellPxInLayer()
+}
+
 /* ===== infra visuals: gravel + brick patterns ===== */
 
 let gravelPattern = null
@@ -322,22 +340,18 @@ function makeGravelPattern() {
   c.height = 128
   const g = c.getContext('2d')
 
-  // base tone (neutral crushed stone)
   g.fillStyle = 'rgba(115,115,115,0.22)'
   g.fillRect(0, 0, c.width, c.height)
 
-  // helper: draw a tiny rotated "chip"
   function chip(x, y, w, h, angleRad, fill) {
     g.save()
     g.translate(x, y)
     g.rotate(angleRad)
     g.fillStyle = fill
-    // centered rect
     g.fillRect(-w / 2, -h / 2, w, h)
     g.restore()
   }
 
-  // lots of small dark chips
   for (let i = 0; i < 1200; i++) {
     const x = Math.random() * c.width
     const y = Math.random() * c.height
@@ -348,7 +362,6 @@ function makeGravelPattern() {
     chip(x, y, w, h, a, `rgba(55,55,55,${alpha})`)
   }
 
-  // medium light chips
   for (let i = 0; i < 600; i++) {
     const x = Math.random() * c.width
     const y = Math.random() * c.height
@@ -359,7 +372,6 @@ function makeGravelPattern() {
     chip(x, y, w, h, a, `rgba(235,235,235,${alpha})`)
   }
 
-  // a few larger "chips" to sell the crushed-stone look
   for (let i = 0; i < 120; i++) {
     const x = Math.random() * c.width
     const y = Math.random() * c.height
@@ -370,7 +382,6 @@ function makeGravelPattern() {
     chip(x, y, w, h, a, `rgba(80,80,80,${alpha})`)
   }
 
-  // faint dusting to soften hard edges (very subtle)
   g.globalAlpha = 0.10
   g.fillStyle = 'rgba(255,255,255,0.20)'
   for (let i = 0; i < 180; i++) {
@@ -389,7 +400,6 @@ function makeBrickPattern() {
   c.height = 128
   const g = c.getContext('2d')
 
-  // mortar base
   g.fillStyle = 'rgba(90,75,30,0.35)'
   g.fillRect(0, 0, c.width, c.height)
 
@@ -404,21 +414,17 @@ function makeBrickPattern() {
     for (let col = -1; col < 10; col++) {
       const x = col * (brickW + gap) + offset
 
-      // brick fill
       g.fillStyle = 'rgba(244,197,66,0.75)'
       g.fillRect(x, y, brickW, brickH)
 
-      // subtle shading
       g.fillStyle = 'rgba(150,110,20,0.18)'
       g.fillRect(x, y + brickH - 3, brickW, 3)
 
-      // highlight edge
       g.fillStyle = 'rgba(255,255,255,0.10)'
       g.fillRect(x + 1, y + 1, brickW - 2, 2)
     }
   }
 
-  // mortar lines
   g.strokeStyle = 'rgba(60,45,15,0.22)'
   g.lineWidth = 1
   for (let y = 0; y <= c.height; y += (brickH + gap)) {
@@ -438,16 +444,28 @@ function tileStyle(t) {
 
   const inPane = anchorsAreInLeafletPane()
 
-  // Position: layer space if mounted into pane (correct for DOM overlays)
-  const p = inPane
-    ? map.latLngToLayerPoint(tileTopLeftLatLng(t.x, t.y))
-    : map.latLngToContainerPoint(tileTopLeftLatLng(t.x, t.y))
+  // FAST PATH: affine math in layer space (no Leaflet calls per anchor)
+  if (inPane) {
+    const cell = camL.cell
+    const px = camL.px0 + (t.x - camL.xmin) * cell
+    const py = camL.py0 + (t.y - camL.ymin) * cell
 
-  // Size: MUST match the effective zoomed tile size on mobile too
-  const cell = inPane ? _cellPxLayer : (WORLD.cellPx * screenScale())
+    const w = Math.max(1, Number(t.w || 1)) * cell
+    const h = Math.max(1, Number(t.h || 1)) * cell
 
-  const w = Math.max(1, Number(t.w || 1)) * cell
-  const h = Math.max(1, Number(t.h || 1)) * cell
+    return {
+      transform: `translate3d(${Math.round(px)}px, ${Math.round(py)}px, 0)`,
+      width: `${Math.round(w)}px`,
+      height: `${Math.round(h)}px`,
+      pointerEvents: 'auto',
+    }
+  }
+
+  // Fallback (should be rare): container space + manual scale
+  const p = map.latLngToContainerPoint(tileTopLeftLatLng(t.x, t.y))
+  const s = screenScale()
+  const w = Math.max(1, Number(t.w || 1)) * WORLD.cellPx * s
+  const h = Math.max(1, Number(t.h || 1)) * WORLD.cellPx * s
 
   return {
     transform: `translate3d(${Math.round(p.x)}px, ${Math.round(p.y)}px, 0)`,
@@ -501,7 +519,6 @@ async function refreshViewport() {
 
     const now = Date.now()
 
-    // 1) Merge newly fetched anchors into cache (touch = LRU)
     for (const t of (payload.anchors || [])) {
       const x = Number(t.x)
       const yUi = backendYToUiY(Number(t.y))
@@ -520,8 +537,6 @@ async function refreshViewport() {
       touchAnchor(k, a)
     }
 
-    // 2) Render list from cache, filtered to padded viewport (intersection test).
-    // Snapshot entries first so we can "touch" while iterating safely.
     const list = []
     const entries = Array.from(anchorCache.entries())
     for (const [k, a] of entries) {
@@ -537,7 +552,6 @@ async function refreshViewport() {
     anchors.value = list
     anchorCacheSize.value = anchorCache.size
 
-    // 3) Hygiene: TTL prune occasionally, LRU eviction always
     anchorPruneCounter++
     if (anchorPruneCounter % ANCHOR_CACHE_PRUNE_EVERY === 0) {
       pruneAnchorsTTL(now)
@@ -554,10 +568,6 @@ async function refreshViewport() {
 
 /* ===== API: infra (best) ===== */
 
-/**
- * Dedup infra fetches using "covered rects".
- * This prevents spamming the backend while panning around the same area.
- */
 const infraFetchedRects = [] // {xmin,xmax,ymin,ymax} in UI coords
 
 function rectCovers(a, b) {
@@ -610,7 +620,6 @@ async function refreshInfraForRect_UI(uiRect) {
 
   const data = await res.json()
 
-  // Merge into Uint8Array
   for (const t of data) {
     const x = Number(t.x)
     const yUi = backendYToUiY(Number(t.y))
@@ -771,12 +780,10 @@ function drawGrid() {
 
   const { xmin, xmax, ymin, ymax } = tileBoundsWithPad_UI(PAD_DRAW)
 
-  // Affine mapping: one projection call, then linear offsets
   const p0 = map.latLngToContainerPoint(tileTopLeftLatLng(xmin, ymin))
   const px0 = Math.round(p0.x)
   const py0 = Math.round(p0.y)
 
-  // keep patterns stable relative to world/grid
   if (gravelPattern?.setTransform) {
     gravelPattern.setTransform(new DOMMatrix().translate(px0, py0))
   }
@@ -784,11 +791,9 @@ function drawGrid() {
     brickPattern.setTransform(new DOMMatrix().translate(px0, py0))
   }
 
-  // thresholds: keep mobile fast
   const useTextures = cellPxScreen >= 40
   const useDetailEdges = cellPxScreen >= 60
 
-  // infra
   for (let y = ymin; y <= ymax; y++) {
     const py = py0 + (y - ymin) * cellPxScreen
     const rowBase = y * WORLD.cols
@@ -799,11 +804,9 @@ function drawGrid() {
       const px = px0 + (x - xmin) * cellPxScreen
 
       if (role === ROLE.YBR) {
-        // base gold tint
         ctx.fillStyle = 'rgba(244, 197, 66, 0.70)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
 
-        // brick overlay
         if (useTextures && brickPattern) {
           ctx.fillStyle = brickPattern
           ctx.globalAlpha = 0.95
@@ -811,18 +814,15 @@ function drawGrid() {
           ctx.globalAlpha = 1
         }
       } else if (role === ROLE.ROAD) {
-        // base neutral road
         ctx.fillStyle = 'rgba(0, 0, 0, 0.10)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
 
-        // gravel overlay
         if (useTextures && gravelPattern) {
           ctx.fillStyle = gravelPattern
           ctx.globalAlpha = 1
           ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
         }
 
-        // subtle edge so it reads as a path
         if (useDetailEdges) {
           ctx.strokeStyle = 'rgba(0,0,0,0.12)'
           ctx.lineWidth = 1
@@ -835,7 +835,6 @@ function drawGrid() {
     }
   }
 
-  // grid (labels optional; keep off while moving for FPS)
   if (SHOW_GRID) {
     ctx.lineWidth = 1
     ctx.strokeStyle = 'rgba(0,0,0,0.10)'
@@ -861,8 +860,8 @@ function scheduleFrame() {
   raf = requestAnimationFrame(() => {
     raf = 0
 
-    // update zoom-dependent tile pixel size once per frame
-    updateCellPxLayer()
+    // ONE snapshot per frame for anchor layout (no per-anchor Leaflet calls)
+    updateAnchorCameraLayer()
 
     drawGrid()
     updateHud()
@@ -953,7 +952,6 @@ onMounted(async () => {
   map.setMaxBounds(bounds)
   map.setView(L.latLng(-worldHeight / 2, worldWidth / 2), lockedZoom, { animate: false })
 
-  // FIX: anchor layer is sized to world space, so mobile scaling matches infra
   mountAnchorsIntoPane()
 
   resizeCanvas()
@@ -963,7 +961,6 @@ onMounted(async () => {
   })
   ro.observe(mapEl.value)
 
-  // init patterns after ctx exists
   gravelPattern = makeGravelPattern()
   brickPattern = makeBrickPattern()
 
