@@ -6,7 +6,7 @@
 
     <div ref="anchorLayerEl" class="anchor-layer">
       <div
-        v-for="t in anchors"
+        v-for="t in renderAnchors"
         :key="`${t.x}:${t.y}`"
         class="tile-shell"
         :class="{ 'is-active': isActive(t) }"
@@ -17,9 +17,11 @@
           :tile="t"
           :flipped="isFlipped(t)"
           :cell="isActive(t) ? activeCell : null"
+          :tab="tabFor(t)"
+          @tab-change="onTabChange(t, $event)"
           @request-cover="flippedKey = null"
         />
-      </div>
+    </div>
     </div>
 
     <div class="hud">
@@ -90,6 +92,46 @@ const router = useRouter()
 
 const flippedKey = ref(null)
 
+import { computed } from 'vue'
+
+// Persist selected tab per tile key ("x:y")
+const tabByKey = reactive(Object.create(null))
+
+function keyForXY(x, y) { return `${x}:${y}` }
+function keyForTile(t) { return `${t.x}:${t.y}` }
+
+function tabFor(t) {
+  return tabByKey[keyForTile(t)] || 'embed'
+}
+
+function onTabChange(t, tab) {
+  tabByKey[keyForTile(t)] = tab
+}
+
+// Keep the active anchor mounted even if it falls out of viewport anchor list
+const pinnedAnchor = ref(null)
+
+// Merge anchors + pinnedAnchor (dedupe by x:y)
+const renderAnchors = computed(() => {
+  const out = []
+  const seen = new Set()
+
+  for (const a of anchors.value) {
+    const k = keyForTile(a)
+    if (!seen.has(k)) {
+      seen.add(k)
+      out.push(a)
+    }
+  }
+
+  const p = pinnedAnchor.value
+  if (p) {
+    const k = keyForTile(p)
+    if (!seen.has(k)) out.push(p)
+  }
+
+  return out
+})
 // 1024*1024 = 1,048,576 bytes (~1MB)
 const infraGrid = new Uint8Array(WORLD.cols * WORLD.rows)
 const infraCount = ref(0) // HUD-only: count of non-zero cells
@@ -239,7 +281,15 @@ async function handleTileClick(t) {
   const activeK = activeKeyFromRoute()
 
   if (activeK === k) {
-    flippedKey.value = flippedKey.value === k ? null : k
+    const willClose = flippedKey.value === k
+    flippedKey.value = willClose ? null : k
+
+    if (willClose) {
+      activeCell.value = null
+      pinnedAnchor.value = null
+      return
+    }
+
     await refreshActiveCellIfNeeded()
     return
   }
@@ -680,12 +730,14 @@ async function refreshInfraMoveEnd() {
 async function refreshActiveCellIfNeeded() {
   if (route.name !== 'tile') {
     activeCell.value = null
+    pinnedAnchor.value = null
     return
   }
 
   const k = activeKeyFromRoute()
   if (!k || flippedKey.value !== k) {
     activeCell.value = null
+    pinnedAnchor.value = null
     return
   }
 
@@ -701,11 +753,35 @@ async function refreshActiveCellIfNeeded() {
       { x, y: yBackend, full: 1 },
       { signal: cellAbort.signal }
     )
+
     activeCell.value = data
+
+    // ✅ Pin the active anchor so it stays mounted even if viewport anchors refresh.
+    if (data?.anchor) {
+      const ax = Number(data.anchor.x)
+      const ay = Number(data.anchor.y)
+      const aw = Number(data.anchor.w || 1)
+      const ah = Number(data.anchor.h || 1)
+
+      pinnedAnchor.value = {
+        x: ax,
+        y: ay,
+        w: aw,
+        h: ah,
+        cover: data.cover || null,
+        object: data.object || null, // optional; full object comes via :cell anyway
+      }
+
+      const kk = `${ax}:${ay}`
+      if (!tabByKey[kk]) tabByKey[kk] = 'embed'
+    } else {
+      pinnedAnchor.value = null
+    }
   } catch (err) {
     if (err?.name === 'AbortError') return
     console.error(err)
     activeCell.value = null
+    pinnedAnchor.value = null
   }
 }
 
