@@ -114,6 +114,21 @@ function screenScale() {
   return map ? map.getZoomScale(map.getZoom(), 0) : 1
 }
 
+// Cached effective tile size in layer pixels (updated once per frame)
+let _cellPxLayer = WORLD.cellPx
+
+function cellPxInLayer() {
+  if (!map) return WORLD.cellPx
+
+  const p0 = map.latLngToLayerPoint(tileTopLeftLatLng(0, 0))
+  const p1 = map.latLngToLayerPoint(tileTopLeftLatLng(1, 0))
+  return Math.abs(p1.x - p0.x) || WORLD.cellPx
+}
+
+function updateCellPxLayer() {
+  _cellPxLayer = cellPxInLayer()
+}
+
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v))
 }
@@ -144,6 +159,8 @@ function pruneAnchorsTTL(nowMs) {
     if ((a.lastSeenMs || 0) < cutoff) anchorCache.delete(k)
   }
 }
+
+
 
 /* ===== backend/ui y normalization ===== */
 
@@ -252,33 +269,46 @@ function onTileClick(t) {
   handleTileClick(t)
 }
 
-/* ===== leaflet pane mounting ===== */
+/* ===== leaflet pane mounting (FIXED) ===== */
+
+const ANCHOR_PANE = 'ewrmAnchors'
 
 function mountAnchorsIntoPane() {
   if (!map) return
   const el = anchorLayerEl.value
   if (!el) return
 
-  const paneName = 'ewrmAnchors'
-  const pane = map.getPane(paneName) || map.createPane(paneName)
+  const pane = map.getPane(ANCHOR_PANE) || map.createPane(ANCHOR_PANE)
   pane.style.zIndex = '600'
   pane.style.pointerEvents = 'none'
-  pane.appendChild(el)
+
+  // Put the anchor layer inside the transformed pane (Leaflet owns scaling)
+  if (el.parentNode !== pane) pane.appendChild(el)
+
+  // This layer is in world pixel space. MUST match world dimensions.
+  const worldW = WORLD.cols * WORLD.cellPx
+  const worldH = WORLD.rows * WORLD.cellPx
 
   el.style.position = 'absolute'
   el.style.left = '0'
   el.style.top = '0'
-  el.style.width = '1px'
-  el.style.height = '1px'
+  el.style.width = `${worldW}px`
+  el.style.height = `${worldH}px`
   el.style.pointerEvents = 'none'
 
+  // Safety: if something re-parents it, force it back next frame.
   requestAnimationFrame(() => {
-    const el = anchorLayerEl.value
-    if (!el) return
-    if (!el.closest('.leaflet-pane')) {
-      pane.appendChild(el)
-    }
+    const el2 = anchorLayerEl.value
+    const pane2 = map?.getPane?.(ANCHOR_PANE)
+    if (!el2 || !pane2) return
+    if (el2.parentNode !== pane2) pane2.appendChild(el2)
   })
+}
+
+function anchorsAreInLeafletPane() {
+  const el = anchorLayerEl.value
+  if (!map || !el) return false
+  return el.parentNode === map.getPane(ANCHOR_PANE)
 }
 
 /* ===== infra visuals: gravel + brick patterns ===== */
@@ -401,12 +431,6 @@ function makeBrickPattern() {
   return g.createPattern(c, 'repeat')
 }
 
-function anchorsAreInLeafletPane() {
-  const el = anchorLayerEl.value
-  if (!el) return false
-  return !!el.closest('.leaflet-pane')
-}
-
 /* ===== anchors ===== */
 
 function tileStyle(t) {
@@ -414,16 +438,16 @@ function tileStyle(t) {
 
   const inPane = anchorsAreInLeafletPane()
 
-  // Position
+  // Position: layer space if mounted into pane (correct for DOM overlays)
   const p = inPane
     ? map.latLngToLayerPoint(tileTopLeftLatLng(t.x, t.y))
     : map.latLngToContainerPoint(tileTopLeftLatLng(t.x, t.y))
 
-  // Size
-  const s = inPane ? 1 : screenScale()
+  // Size: MUST match the effective zoomed tile size on mobile too
+  const cell = inPane ? _cellPxLayer : (WORLD.cellPx * screenScale())
 
-  const w = Math.max(1, Number(t.w || 1)) * WORLD.cellPx * s
-  const h = Math.max(1, Number(t.h || 1)) * WORLD.cellPx * s
+  const w = Math.max(1, Number(t.w || 1)) * cell
+  const h = Math.max(1, Number(t.h || 1)) * cell
 
   return {
     transform: `translate3d(${Math.round(p.x)}px, ${Math.round(p.y)}px, 0)`,
@@ -731,11 +755,10 @@ function resizeCanvas() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 }
 
-
 function drawGrid() {
   if (!map || !ctx) return
 
-const SHOW_GRID = true
+  const SHOW_GRID = true
 
   const canvas = gridCanvasEl.value
   const w = canvas.clientWidth
@@ -813,7 +836,7 @@ const SHOW_GRID = true
   }
 
   // grid (labels optional; keep off while moving for FPS)
-if (SHOW_GRID) {
+  if (SHOW_GRID) {
     ctx.lineWidth = 1
     ctx.strokeStyle = 'rgba(0,0,0,0.10)'
     ctx.font = '12px system-ui'
@@ -837,6 +860,10 @@ function scheduleFrame() {
   if (raf) return
   raf = requestAnimationFrame(() => {
     raf = 0
+
+    // update zoom-dependent tile pixel size once per frame
+    updateCellPxLayer()
+
     drawGrid()
     updateHud()
   })
@@ -926,6 +953,7 @@ onMounted(async () => {
   map.setMaxBounds(bounds)
   map.setView(L.latLng(-worldHeight / 2, worldWidth / 2), lockedZoom, { animate: false })
 
+  // FIX: anchor layer is sized to world space, so mobile scaling matches infra
   mountAnchorsIntoPane()
 
   resizeCanvas()
