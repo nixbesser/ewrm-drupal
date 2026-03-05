@@ -8,6 +8,7 @@
       <div
         v-for="t in renderAnchors"
         :key="`${t.x}:${t.y}`"
+        v-memo="[t.x, t.y, t.w, t.h, t.cover, t.flippable, t.ddt, isFlipped(t), isActive(t), tabFor(t)]"
         class="tile-shell"
         :data-ddt="t.ddt ? '1' : '0'"
         :class="{ 'is-active': isActive(t), 'is-flipped': isFlipped(t) }"
