@@ -9,6 +9,7 @@
         v-for="t in renderAnchors"
         :key="`${t.x}:${t.y}`"
         class="tile-shell"
+        :data-ddt="t.ddt ? '1' : '0'"
         :class="{ 'is-active': isActive(t) }"
         :style="tileStyle(t)"
         @click.stop="onTileClick(t)"
@@ -21,7 +22,7 @@
           @tab-change="onTabChange(t, $event)"
           @request-cover="flippedKey = null"
         />
-    </div>
+      </div>
     </div>
 
     <div class="hud">
@@ -41,7 +42,7 @@
 
 <script setup>
 import L from 'leaflet'
-import { ref, onMounted, onBeforeUnmount, watch, reactive } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, reactive, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { fetchViewport, fetchCell, resolveObject } from '../api/worldApi'
 import TileAnchor from './TileAnchor.vue'
@@ -92,21 +93,11 @@ const router = useRouter()
 
 const flippedKey = ref(null)
 
-import { computed } from 'vue'
-
 // Persist selected tab per tile key ("x:y")
 const tabByKey = reactive(Object.create(null))
-
-function keyForXY(x, y) { return `${x}:${y}` }
 function keyForTile(t) { return `${t.x}:${t.y}` }
-
-function tabFor(t) {
-  return tabByKey[keyForTile(t)] || 'embed'
-}
-
-function onTabChange(t, tab) {
-  tabByKey[keyForTile(t)] = tab
-}
+function tabFor(t) { return tabByKey[keyForTile(t)] || 'embed' }
+function onTabChange(t, tab) { tabByKey[keyForTile(t)] = tab }
 
 // Keep the active anchor mounted even if it falls out of viewport anchor list
 const pinnedAnchor = ref(null)
@@ -132,6 +123,7 @@ const renderAnchors = computed(() => {
 
   return out
 })
+
 // 1024*1024 = 1,048,576 bytes (~1MB)
 const infraGrid = new Uint8Array(WORLD.cols * WORLD.rows)
 const infraCount = ref(0) // HUD-only: count of non-zero cells
@@ -186,6 +178,13 @@ function pruneAnchorsTTL(nowMs) {
   for (const [k, a] of anchorCache) {
     if ((a.lastSeenMs || 0) < cutoff) anchorCache.delete(k)
   }
+}
+
+function tileXYFromPointerEvent(e) {
+  if (!map) return null
+  const p = map.mouseEventToContainerPoint(e)
+  const ll = map.containerPointToLatLng(p)
+  return latLngToTileXY(ll) // returns {x,y} in UI coords in your file
 }
 
 /* ===== backend/ui y normalization ===== */
@@ -584,6 +583,8 @@ async function refreshViewport() {
         h: Math.max(1, Number(t.h || 1)),
         cover: t.cover || null,
         object: t.object || null,
+        flippable: (t.flippable !== undefined) ? !!t.flippable : undefined,
+        ddt: !!t.ddt, // ✅ IMPORTANT: store DDT
         lastSeenMs: now,
       }
       touchAnchor(k, a)
@@ -770,7 +771,9 @@ async function refreshActiveCellIfNeeded() {
         w: aw,
         h: ah,
         cover: data.cover || null,
-        object: data.object || null, // optional; full object comes via :cell anyway
+        object: data.object || null,
+        ddt: !!data.ddt, // ✅ carry DDT from cell payload
+        flippable: (data.flippable !== undefined) ? !!data.flippable : undefined,
       }
 
       const kk = `${ax}:${ay}`
@@ -978,6 +981,60 @@ async function handleRoutePipeline() {
   scheduleFrame()
 }
 
+/* ===== DDT Drag gating (CLEAN) ===== */
+
+let ddtPointerDownHandler = null
+let ddtPointerUpHandler = null
+
+function installDDTDragGating() {
+  if (!map) return
+
+  map.dragging.disable()
+
+  const container = map.getContainer()
+
+ddtPointerDownHandler = (e) => {
+    // 1) DDT anchor tiles (Drupal field_ddt)
+    const shell = e.target?.closest?.('.tile-shell')
+    const isDDTAnchor = !!shell && shell.dataset.ddt === '1'
+
+    // 2) Infra tiles (roads/YBR) from canvas grid
+    let isDDTInfra = false
+    const xy = tileXYFromPointerEvent(e)
+    if (xy) {
+      const role = infraGrid[idxOf(xy.x, xy.y)]
+      isDDTInfra = (role === ROLE.ROAD || role === ROLE.YBR)
+    }
+
+    const ok = isDDTAnchor || isDDTInfra
+    ok ? map.dragging.enable() : map.dragging.disable()
+  }
+
+  ddtPointerUpHandler = () => {
+    map.dragging.disable()
+  }
+
+  container.addEventListener('pointerdown', ddtPointerDownHandler, { passive: true, capture: true })
+  container.addEventListener('pointerup', ddtPointerUpHandler, { passive: true, capture: true })
+  container.addEventListener('pointercancel', ddtPointerUpHandler, { passive: true, capture: true })
+}
+
+function uninstallDDTDragGating() {
+  const container = map?.getContainer?.()
+  if (!container) return
+
+  if (ddtPointerDownHandler) {
+    container.removeEventListener('pointerdown', ddtPointerDownHandler, true)
+  }
+  if (ddtPointerUpHandler) {
+    container.removeEventListener('pointerup', ddtPointerUpHandler, true)
+    container.removeEventListener('pointercancel', ddtPointerUpHandler, true)
+  }
+
+  ddtPointerDownHandler = null
+  ddtPointerUpHandler = null
+}
+
 /* ===== lifecycle ===== */
 
 let ro = null
@@ -990,7 +1047,6 @@ onMounted(async () => {
   await new Promise(requestAnimationFrame)
 
   const containerWidth = mapEl.value.getBoundingClientRect().width
-
   const TILE_PX = WORLD.cellPx
   const paddingPx = 32
 
@@ -1026,6 +1082,9 @@ onMounted(async () => {
     fadeAnimation: false,
     markerZoomAnimation: false,
   })
+
+  // ✅ install clean drag gating (DDT only)
+  installDDTDragGating()
 
   map.setMaxBounds(bounds)
   map.setView(L.latLng(-worldHeight / 2, worldWidth / 2), lockedZoom, { animate: false })
@@ -1071,12 +1130,19 @@ onMounted(async () => {
 
   map.on('click', (e) => {
     if (didMoveSinceDown) return
+
     const target = e.originalEvent?.target
     if (target && target.closest && target.closest('.tile-shell')) return
 
+    // ✅ If a tile is open, don't close it when clicking empty space.
+    // Optional: just pan to where the user clicked.
+    if (flippedKey.value) {
+      // map.panTo(e.latlng, { animate: false })
+      return
+    }
+
+    // If no tile is open, clicking empty space can navigate.
     const { x, y } = latLngToTileXY(e.latlng)
-    flippedKey.value = null
-    activeCell.value = null
 
     pendingNavSource = 'click'
     router.push({ name: 'tile', params: { z: WORLD.z, x, y } })
@@ -1100,6 +1166,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  // abort requests
   try { cellAbort?.abort() } catch (_) {}
   try { viewportAbort?.abort() } catch (_) {}
 
@@ -1110,6 +1177,10 @@ onBeforeUnmount(() => {
   if (raf) cancelAnimationFrame(raf)
 
   ro?.disconnect()
+
+  // ✅ clean DDT gating listeners
+  uninstallDDTDragGating()
+
   map?.remove()
   map = null
 
