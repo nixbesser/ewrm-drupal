@@ -135,7 +135,11 @@ function tabFor(t) {
 
   return tabByKey[key] || tabs[0].id
 }
-function onTabChange(t, tab) { tabByKey[keyForTile(t)] = tab }
+
+function onTabChange(t, tab) {
+  if (tab === 'cover') return
+  tabByKey[keyForTile(t)] = tab
+}
 
 // Keep the active anchor mounted even if it falls out of viewport anchor list
 const pinnedAnchor = ref(null)

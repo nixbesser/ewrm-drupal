@@ -334,10 +334,8 @@ function setTab(id) {
 }
 
 function onCoverTab() {
-  // “Cover” means flip back to front immediately.
+  // Cover is an action, not a persisted tab.
   emit('request-cover')
-  // Still report the selection to persist state
-  emit('tab-change', 'cover')
 }
 
 function onTabClick(id) {
