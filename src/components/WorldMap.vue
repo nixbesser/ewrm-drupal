@@ -195,6 +195,64 @@ function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v))
 }
 
+/* ===== landscape helpers ===== */
+
+function hash2D(x, y) {
+  let h = x * 374761393 + y * 668265263
+  h = (h ^ (h >> 13)) * 1274126177
+  h = h ^ (h >> 16)
+  return (h >>> 0)
+}
+
+function emptyTileKind(x, y) {
+  const h = hash2D(x, y) % 100
+
+  if (h < 45) return 'grass'
+  if (h < 65) return 'dirt'
+  if (h < 80) return 'scrub'
+  if (h < 92) return 'sand'
+  return 'stone'
+}
+
+function drawEmptyLandscapeTile(ctx, x, y, px, py, cellPx) {
+  const kind = emptyTileKind(x, y)
+
+  if (kind === 'grass') {
+    ctx.fillStyle = 'rgba(170, 186, 135, 0.32)'
+    ctx.fillRect(px, py, cellPx, cellPx)
+  } else if (kind === 'dirt') {
+    ctx.fillStyle = 'rgba(160, 136, 102, 0.28)'
+    ctx.fillRect(px, py, cellPx, cellPx)
+  } else if (kind === 'scrub') {
+    ctx.fillStyle = 'rgba(150, 165, 120, 0.24)'
+    ctx.fillRect(px, py, cellPx, cellPx)
+  } else if (kind === 'sand') {
+    ctx.fillStyle = 'rgba(196, 180, 126, 0.22)'
+    ctx.fillRect(px, py, cellPx, cellPx)
+  } else {
+    ctx.fillStyle = 'rgba(145, 145, 145, 0.16)'
+    ctx.fillRect(px, py, cellPx, cellPx)
+  }
+
+  // optional subtle speckle when zoomed in
+  if (cellPx >= 40) {
+    const h = hash2D(x, y)
+    const count = 6 + (h % 8)
+    ctx.fillStyle = 'rgba(0,0,0,0.06)'
+    for (let i = 0; i < count; i++) {
+      const dx = ((h >> (i % 16)) % 1000) / 1000
+      const dy = ((h >> ((i + 5) % 16)) % 1000) / 1000
+      ctx.fillRect(
+        px + dx * (cellPx - 3),
+        py + dy * (cellPx - 3),
+        2,
+        2
+      )
+    }
+  }
+}
+
+
 /* ===== anchor cache helpers (LRU + TTL) ===== */
 
 function anchorKey(x, yUi) {
@@ -858,7 +916,7 @@ async function refreshActiveCellIfNeeded() {
 /* ===== deep-link centering ===== */
 
 async function centerDeepLinkIfNeeded() {
-  if (!map) return
+  if (!map) return null
 
   if (route.name === 'object') {
     const bundle = String(route.params.bundle)
@@ -869,10 +927,10 @@ async function centerDeepLinkIfNeeded() {
       const ayUi = backendYToUiY(Number(resolved.anchor.y))
       router.replace({ name: 'tile', params: { z: WORLD.z, x: ax, y: ayUi } })
     }
-    return
+    return null
   }
 
-  if (route.name !== 'tile') return
+  if (route.name !== 'tile') return null
 
   const x = clamp(parseInt(route.params.x, 10), 0, WORLD.cols - 1)
   const yUi = clamp(parseInt(route.params.y, 10), 0, WORLD.rows - 1)
@@ -887,8 +945,10 @@ async function centerDeepLinkIfNeeded() {
     const ayUi = backendYToUiY(ayBackend)
 
     map.setView(tileCenterLatLng(ax, ayUi, aw, ah), map.getZoom(), { animate: false })
+    return data
   } catch (_) {
     map.setView(tileCenterLatLng(x, yUi, 1, 1), map.getZoom(), { animate: false })
+    return null
   }
 }
 
@@ -944,11 +1004,15 @@ function drawGrid() {
   for (let y = ymin; y <= ymax; y++) {
     const py = py0 + (y - ymin) * cellPxScreen
     const rowBase = y * WORLD.cols
-    for (let x = xmin; x <= xmax; x++) {
-      const role = infraGrid[rowBase + x]
-      if (role === ROLE.NONE) continue
 
+    for (let x = xmin; x <= xmax; x++) {
       const px = px0 + (x - xmin) * cellPxScreen
+      const role = infraGrid[rowBase + x]
+
+      if (role === ROLE.NONE) {
+        drawEmptyLandscapeTile(ctx, x, y, px, py, cellPxScreen)
+        continue
+      }
 
       if (role === ROLE.YBR) {
         ctx.fillStyle = 'rgba(244, 197, 66, 0.70)'
@@ -1027,15 +1091,30 @@ async function handleRoutePipeline() {
     !hasInitialized ||
     (source !== 'click' && (route.name === 'tile' || route.name === 'object'))
 
+  let deepLinkCell = null
   if (isDeepLinkCenterCase) {
-    await centerDeepLinkIfNeeded()
+    deepLinkCell = await centerDeepLinkIfNeeded()
   }
 
   if (source !== 'click' && route.name === 'tile') {
     const rx = Number(route.params.x)
     const ry = Number(route.params.y)
+
     if (Number.isFinite(rx) && Number.isFinite(ry)) {
-      flippedKey.value = `${rx}:${ry}`
+      // Reuse the cell data fetched during centering when available.
+      let data = deepLinkCell
+
+      if (!data) {
+        const yBackend = uiYToBackendY(ry)
+        try {
+          data = await fetchCell({ x: rx, y: yBackend })
+        } catch (_) {
+          data = null
+        }
+      }
+
+      const canFlip = data?.flippable === true
+      flippedKey.value = canFlip ? `${rx}:${ry}` : null
     }
   }
 
