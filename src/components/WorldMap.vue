@@ -801,24 +801,48 @@ async function refreshActiveCellIfNeeded() {
     activeCell.value = data
 
     // ✅ Pin the active anchor so it stays mounted even if viewport anchors refresh.
+    // ✅ Also enrich the anchor cache with the FULL object so reopen uses full tabs immediately.
     if (data?.anchor) {
       const ax = Number(data.anchor.x)
       const ay = Number(data.anchor.y)
       const aw = Number(data.anchor.w || 1)
       const ah = Number(data.anchor.h || 1)
+      const kk = `${ax}:${ay}`
 
-      pinnedAnchor.value = {
+      const fullAnchor = {
         x: ax,
         y: ay,
         w: aw,
         h: ah,
         cover: data.cover || null,
         object: data.object || null,
-        ddt: !!data.ddt, // ✅ carry DDT from cell payload
+        ddt: !!data.ddt,
         flippable: (data.flippable !== undefined) ? !!data.flippable : undefined,
+        lastSeenMs: Date.now(),
       }
 
-      const kk = `${ax}:${ay}`
+      // Keep pinned anchor in sync
+      pinnedAnchor.value = fullAnchor
+
+      // Enrich anchor cache with the full object
+      touchAnchor(kk, fullAnchor)
+      anchorCacheSize.value = anchorCache.size
+
+      // Update the currently rendered anchors list too
+      anchors.value = anchors.value.map((a) =>
+        `${a.x}:${a.y}` === kk
+          ? {
+              ...a,
+              cover: fullAnchor.cover,
+              object: fullAnchor.object,
+              ddt: fullAnchor.ddt,
+              flippable: fullAnchor.flippable,
+              w: fullAnchor.w,
+              h: fullAnchor.h,
+            }
+          : a
+      )
+
       if (!tabByKey[kk]) tabByKey[kk] = 'embed'
     } else {
       pinnedAnchor.value = null

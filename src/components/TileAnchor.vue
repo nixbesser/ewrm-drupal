@@ -33,7 +33,7 @@
           <!-- PANELS -->
           <div class="panel tile-panel">
             <!-- EMBED -->
-            <div v-if="activeTab === 'embed'" class="panel__body">
+            <div v-show="activeTab === 'embed'" class="panel__body">
               <div v-if="!embedUrl" class="back__hint">No embed_url yet.</div>
 
               <div v-else>
@@ -80,13 +80,13 @@
             </div>
 
             <!-- DESCRIPTION -->
-            <div v-else-if="activeTab === 'description'" class="panel__body">
+            <div v-show="activeTab === 'description'" class="panel__body">
               <div v-if="descriptionText" class="prose tile-body">{{ descriptionText }}</div>
               <div v-else class="back__hint">No description yet.</div>
             </div>
 
             <!-- LINKS -->
-            <div v-else-if="activeTab === 'links'" class="panel__body">
+            <div v-show="activeTab === 'links'" class="panel__body">
               <div v-if="links.length" class="links">
                 <a
                   v-for="l in links"
@@ -104,9 +104,9 @@
               <div v-else class="back__hint">No links yet.</div>
             </div>
 
-            <!-- COVER (default panel) -->
-            <div v-else class="panel__body">
-              <button class="coverBtn" type="button" @click.stop="emit('request-cover')">
+            <!-- COVER -->
+            <div v-show="activeTab === 'cover'" class="panel__body">
+              <button class="coverBtn" type="button" @click.stop="onCoverTab()">
                 Flip to cover
               </button>
 
@@ -333,8 +333,17 @@ function setTab(id) {
   emit('tab-change', id)
 }
 
+function firstContentTab() {
+  if (embedUrl.value) return 'embed'
+  if (descriptionText.value) return 'description'
+  if (links.value.length) return 'links'
+  return 'cover'
+}
+
 function onCoverTab() {
   // Cover is an action, not a persisted tab.
+  // Reset local tab so reopening lands on a real content tab.
+  activeTab.value = firstContentTab()
   emit('request-cover')
 }
 
@@ -378,30 +387,43 @@ watch(
  * - abort and reset when unflipped or embedUrl disappears
  */
 watch(
-  () => [props.flipped, activeTab.value, embedUrl.value, embedStart.value, obj.value?.id],
-  ([isFlipped, tab, url]) => {
-    if (!url) {
-      abortInFlight()
-      resetStateToIdle()
+   () => [props.flipped, activeTab.value, embedUrl.value, embedStart.value, obj.value?.id],
+   ([isFlipped, tab, url]) => {
+     if (!url) {
+       abortInFlight()
+       resetStateToIdle()
 
-      // If no embed_url, pick a sensible default locally only if parent isn't controlling
-      if (!props.tab) {
-        if (descriptionText.value) activeTab.value = 'description'
-        else if (links.value.length) activeTab.value = 'links'
-        else activeTab.value = 'cover'
-      }
-      return
-    }
+       if (!props.tab) {
+         if (descriptionText.value) activeTab.value = 'description'
+         else if (links.value.length) activeTab.value = 'links'
+         else activeTab.value = 'cover'
+       }
+       return
+     }
 
-    if (isFlipped && tab === 'embed') {
-      loadEmbed(url)
-    } else {
-      abortInFlight()
-      resetStateToIdle()
-    }
-  },
-  { immediate: true }
-)
+     if (isFlipped) {
+       if (tab === 'embed' && embedState.status === 'idle') {
+         loadEmbed(url)
+       }
+     } else {
+       abortInFlight()
+       resetStateToIdle()
+     }
+   },
+   { immediate: true }
+ )
+
+watch(
+   () => props.flipped,
+   (isFlipped) => {
+     if (!isFlipped) return
+
+     // Only initialize if parent hasn't chosen a tab
+     if (!props.tab) {
+       activeTab.value = firstContentTab()
+     }
+   }
+ )
 
 onBeforeUnmount(() => {
   abortInFlight()
