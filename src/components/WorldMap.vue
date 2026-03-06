@@ -287,6 +287,81 @@ function terrainBand(x, y) {
   return 'stone'
 }
 
+function emptyTileLandmark(x, y) {
+  const h = hash2D(x, y) % 1000
+
+  // sparse: about 1.4% of empty tiles
+  if (h < 4) return 'pond'
+  if (h < 8) return 'ruin'
+  if (h < 14) return 'rocks'
+  if (h < 18) return 'shrub'
+  return null
+}
+
+function drawEmptyLandmark(ctx, x, y, px, py, cellPx) {
+  const kind = emptyTileLandmark(x, y)
+  if (!kind) return
+
+  // only draw details when tile is big enough on screen
+  if (cellPx < 28) return
+
+  const cx = px + cellPx * 0.5
+  const cy = py + cellPx * 0.5
+
+  if (kind === 'pond') {
+    ctx.fillStyle = 'rgba(110, 150, 180, 0.32)'
+    ctx.beginPath()
+    ctx.ellipse(cx, cy, cellPx * 0.22, cellPx * 0.16, 0, 0, Math.PI * 2)
+    ctx.fill()
+
+    ctx.strokeStyle = 'rgba(70, 110, 140, 0.24)'
+    ctx.lineWidth = 1
+    ctx.stroke()
+    return
+  }
+
+  if (kind === 'ruin') {
+    ctx.strokeStyle = 'rgba(90, 90, 90, 0.28)'
+    ctx.lineWidth = Math.max(1, cellPx * 0.03)
+    ctx.strokeRect(
+      px + cellPx * 0.28,
+      py + cellPx * 0.28,
+      cellPx * 0.44,
+      cellPx * 0.44
+    )
+
+    ctx.strokeRect(
+      px + cellPx * 0.38,
+      py + cellPx * 0.38,
+      cellPx * 0.10,
+      cellPx * 0.10
+    )
+    return
+  }
+
+  if (kind === 'rocks') {
+    ctx.fillStyle = 'rgba(95, 95, 95, 0.24)'
+    for (let i = 0; i < 4; i++) {
+      const ox = ((hash2D(x + i, y) % 100) / 100 - 0.5) * cellPx * 0.24
+      const oy = ((hash2D(x, y + i) % 100) / 100 - 0.5) * cellPx * 0.24
+      ctx.beginPath()
+      ctx.arc(cx + ox, cy + oy, cellPx * 0.06, 0, Math.PI * 2)
+      ctx.fill()
+    }
+    return
+  }
+
+  if (kind === 'shrub') {
+    ctx.fillStyle = 'rgba(80, 120, 70, 0.26)'
+    for (let i = 0; i < 3; i++) {
+      const ox = ((hash2D(x * 3 + i, y) % 100) / 100 - 0.5) * cellPx * 0.18
+      const oy = ((hash2D(x, y * 3 + i) % 100) / 100 - 0.5) * cellPx * 0.18
+      ctx.beginPath()
+      ctx.arc(cx + ox, cy + oy, cellPx * 0.05, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }
+}
 
 /* ===== anchor cache helpers (LRU + TTL) ===== */
 
@@ -1028,7 +1103,7 @@ function resizeCanvas() {
 function drawGrid() {
   if (!map || !ctx) return
 
-  const SHOW_GRID = true
+  const SHOW_GRID = false
 
   const canvas = gridCanvasEl.value
   const w = canvas.clientWidth
@@ -1065,6 +1140,7 @@ function drawGrid() {
 
       if (role === ROLE.NONE) {
         drawEmptyLandscapeTile(ctx, x, y, px, py, cellPxScreen)
+        drawEmptyLandmark(ctx, x, y, px, py, cellPxScreen)
         continue
       }
 
