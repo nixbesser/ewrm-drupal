@@ -205,13 +205,32 @@ function hash2D(x, y) {
 }
 
 function emptyTileKind(x, y) {
+  const band = terrainBand(x, y)
   const h = hash2D(x, y) % 100
 
-  if (h < 45) return 'grass'
-  if (h < 65) return 'dirt'
-  if (h < 80) return 'scrub'
-  if (h < 92) return 'sand'
-  return 'stone'
+  if (band === 'grass') {
+    if (h < 70) return 'grass'
+    if (h < 90) return 'scrub'
+    return 'dirt'
+  }
+
+  if (band === 'scrub') {
+    if (h < 60) return 'scrub'
+    if (h < 80) return 'dirt'
+    return 'stone'
+  }
+
+  if (band === 'sand') {
+    if (h < 80) return 'sand'
+    return 'stone'
+  }
+
+  if (band === 'stone') {
+    if (h < 70) return 'stone'
+    return 'scrub'
+  }
+
+  return 'grass'
 }
 
 function drawEmptyLandscapeTile(ctx, x, y, px, py, cellPx) {
@@ -250,6 +269,22 @@ function drawEmptyLandscapeTile(ctx, x, y, px, py, cellPx) {
       )
     }
   }
+}
+
+function terrainBand(x, y) {
+  // very low frequency field
+  const nx = x * 0.004
+  const ny = y * 0.004
+
+  const v =
+    Math.sin(nx * 1.7) +
+    Math.sin(ny * 1.3) +
+    Math.sin((nx + ny) * 1.1)
+
+  if (v < -1.2) return 'sand'
+  if (v < -0.2) return 'scrub'
+  if (v < 0.8) return 'grass'
+  return 'stone'
 }
 
 
@@ -962,10 +997,29 @@ function resizeCanvas() {
   const rect = host.getBoundingClientRect()
   const dpr = window.devicePixelRatio || 1
 
-  canvas.style.width = `${Math.round(rect.width)}px`
-  canvas.style.height = `${Math.round(rect.height)}px`
-  canvas.width = Math.round(rect.width * dpr)
-  canvas.height = Math.round(rect.height * dpr)
+  const cssW = Math.round(rect.width)
+  const cssH = Math.round(rect.height)
+  const pxW = Math.round(cssW * dpr)
+  const pxH = Math.round(cssH * dpr)
+
+  // Avoid resetting canvas unless dimensions actually changed.
+  if (
+    canvas.width === pxW &&
+    canvas.height === pxH &&
+    canvas.style.width === `${cssW}px` &&
+    canvas.style.height === `${cssH}px`
+  ) {
+    if (!ctx) {
+      ctx = canvas.getContext('2d')
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    }
+    return
+  }
+
+  canvas.style.width = `${cssW}px`
+  canvas.style.height = `${cssH}px`
+  canvas.width = pxW
+  canvas.height = pxH
 
   ctx = canvas.getContext('2d')
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -1247,7 +1301,9 @@ onMounted(async () => {
   resizeCanvas()
   ro = new ResizeObserver(() => {
     resizeCanvas()
-    scheduleFrame()
+    updateAnchorCameraLayer()
+    drawGrid()
+    updateHud()
   })
   ro.observe(mapEl.value)
 
