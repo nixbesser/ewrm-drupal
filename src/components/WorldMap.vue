@@ -84,6 +84,7 @@ const anchorCacheSize = ref(0)
 const REALTIME_PATH = '/rt/'
 const PRESENCE_PANE = 'ewrmPresence'
 const PRESENCE_RADIUS = 18
+const PRESENCE_REGION_SIZE = 128
 
 const PRESENCE_STYLE_SELF = {
   pane: PRESENCE_PANE,
@@ -107,7 +108,7 @@ const PRESENCE_STYLE_OTHER = {
 
 let socket = null
 let ownSocketId = null
-let lastViewportRegion = null
+let lastViewportRegions = []
 const presenceMarkers = new Map() // socketId -> L.circleMarker
 const presenceCount = ref(0)
 
@@ -1491,24 +1492,60 @@ function currentRouteTile() {
   }
 }
 
-function regionKeyForTile(x, y) {
-  const size = 64
-  return `${Math.floor(x / size)}:${Math.floor(y / size)}`
+function regionKeysForViewport(pad = 1) {
+  if (!map) return []
+
+  const bounds = map.getBounds()
+  const nw = bounds.getNorthWest()
+  const se = bounds.getSouthEast()
+
+  const tl = latLngToTileXY(nw)
+  const br = latLngToTileXY(se)
+
+  const minRx = Math.floor(tl.x / PRESENCE_REGION_SIZE) - pad
+  const maxRx = Math.floor(br.x / PRESENCE_REGION_SIZE) + pad
+  const minRy = Math.floor(tl.y / PRESENCE_REGION_SIZE) - pad
+  const maxRy = Math.floor(br.y / PRESENCE_REGION_SIZE) + pad
+
+  const maxRegionX = Math.ceil(WORLD.cols / PRESENCE_REGION_SIZE) - 1
+  const maxRegionY = Math.ceil(WORLD.rows / PRESENCE_REGION_SIZE) - 1
+
+  const regions = []
+
+  for (let ry = minRy; ry <= maxRy; ry++) {
+    for (let rx = minRx; rx <= maxRx; rx++) {
+      if (rx < 0 || ry < 0) continue
+      if (rx > maxRegionX || ry > maxRegionY) continue
+      regions.push(`${rx}:${ry}`)
+    }
+  }
+
+  return regions
 }
 
-function refreshPresenceForViewportCenter() {
+function sameRegionArray(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false
+  if (a.length !== b.length) return false
+
+  const as = [...a].sort()
+  const bs = [...b].sort()
+
+  for (let i = 0; i < as.length; i++) {
+    if (as[i] !== bs[i]) return false
+  }
+
+  return true
+}
+
+function refreshPresenceForViewport() {
   if (!map || !socket) return
 
-  const center = latLngToTileXY(map.getCenter())
-  const region = regionKeyForTile(center.x, center.y)
+  const regions = regionKeysForViewport(1)
 
-  if (region === lastViewportRegion) return
-  lastViewportRegion = region
+  if (sameRegionArray(regions, lastViewportRegions)) return
+  lastViewportRegions = [...regions]
 
-  socket.emit('presence:watch', {
-    x: center.x,
-    y: center.y,
-  })
+  socket.emit('presence:watchMany', { regions })
 }
 
 function setSelfPresence(x, y, ox = 0.5, oy = 0.5) {
@@ -1550,14 +1587,15 @@ function initRealtime() {
 
   socket.on('connect', () => {
     ownSocketId = socket.id || null
-    lastViewportRegion = null
+    lastViewportRegions = []
+
     emitPresenceJoinForCurrentRoute()
-    refreshPresenceForViewportCenter()
+    refreshPresenceForViewport()
   })
 
   socket.on('disconnect', () => {
     ownSocketId = null
-    lastViewportRegion = null
+    lastViewportRegions = []
     clearPresenceMarkers()
   })
 
@@ -1600,7 +1638,7 @@ function destroyRealtime() {
   socket.disconnect()
   socket = null
   ownSocketId = null
-  lastViewportRegion = null
+  lastViewportRegions = []
   clearPresenceMarkers()
 }
 
@@ -1695,11 +1733,13 @@ onMounted(async () => {
       await refreshInfraMoveEnd()
       await refreshActiveCellIfNeeded()
     } finally {
-        isMoving = false
-        refreshPresenceForViewportCenter()
-        scheduleFrame()
-      }
-    })
+      isMoving = false
+      refreshPresenceForViewport()
+      scheduleFrame()
+    }
+  })
+
+  map.on('zoomend', refreshPresenceForViewport)
 
   map.on('click', (e) => {
     if (didMoveSinceDown) return
