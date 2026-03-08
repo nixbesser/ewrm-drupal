@@ -204,9 +204,49 @@ function hash2D(x, y) {
   return (h >>> 0)
 }
 
+function terrainBlend(x, y) {
+  const n =
+    Math.sin(x * 0.23) +
+    Math.sin(y * 0.19) +
+    Math.sin((x + y) * 0.11)
+
+  return n
+}
+
 function emptyTileKind(x, y) {
+  const macro = macroTerrain(x, y)
   const band = terrainBand(x, y)
-  const h = hash2D(x, y) % 100
+  const blend = terrainBlend(x, y)
+
+  const h = (hash2D(x, y) + Math.floor(blend * 12)) % 100
+
+
+  // ===== MACRO TERRAIN (large world features) =====
+
+  if (macro === 'mountain') {
+    if (h < 60) return 'stone'
+    if (h < 85) return 'scrub'
+    return 'dirt'
+  }
+
+  if (macro === 'upland') {
+    if (h < 60) return 'scrub'
+    if (h < 85) return 'grass'
+    return 'stone'
+  }
+
+  if (macro === 'basin') {
+    if (h < 60) return 'grass'
+    if (h < 80) return 'scrub'
+    return 'dirt'
+  }
+
+  if (macro === 'coast') {
+    if (h < 70) return 'sand'
+    return 'stone'
+  }
+
+  // ===== BAND TERRAIN (regional variation) =====
 
   if (band === 'grass') {
     if (h < 70) return 'grass'
@@ -269,6 +309,22 @@ function drawEmptyLandscapeTile(ctx, x, y, px, py, cellPx) {
       )
     }
   }
+}
+
+function macroTerrain(x, y) {
+  const nx = x * 0.0015
+  const ny = y * 0.0015
+
+  const v =
+    Math.sin(nx * 0.9) +
+    Math.sin(ny * 0.7) +
+    Math.sin((nx + ny) * 0.6)
+
+  if (v > 1.3) return 'mountain'
+  if (v > 0.5) return 'upland'
+  if (v > -0.6) return 'plain'
+  if (v > -1.2) return 'basin'
+  return 'coast'
 }
 
 function terrainBand(x, y) {
