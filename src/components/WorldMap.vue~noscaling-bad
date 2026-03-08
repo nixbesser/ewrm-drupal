@@ -4,32 +4,32 @@
 
     <canvas ref="gridCanvasEl" class="grid-canvas"></canvas>
 
- <div ref="anchorLayerEl" class="anchor-layer">
-   <div
-     v-for="t in renderAnchors"
-     :key="`${t.x}:${t.y}`"
-     v-memo="[
-       t.x, t.y, t.w, t.h, t.cover, t.flippable, t.ddt,
-       isFlipped(t), isActive(t), tabFor(t),
-       tabsForTile(t)
-     ]"
-     class="tile-shell"
-     :data-ddt="t.ddt ? '1' : '0'"
-     :class="{ 'is-active': isActive(t), 'is-flipped': isFlipped(t) }"
-     :style="tileStyle(t)"
-     @click.stop="onTileClick(t)"
-   >
-     <TileAnchor
-       :tile="t"
-       :flipped="isFlipped(t)"
-       :cell="isActive(t) ? activeCell : null"
-       :tab="tabFor(t)"
-       :tabs="tabsForTile(t)"
-       @tab-change="onTabChange(t, $event)"
-       @request-cover="flippedKey = null"
-     />
-   </div>
- </div>
+    <div ref="anchorLayerEl" class="anchor-layer">
+      <div
+        v-for="t in renderAnchors"
+        :key="`${t.x}:${t.y}`"
+        v-memo="[
+          t.x, t.y, t.w, t.h, t.cover, t.flippable, t.ddt,
+          isFlipped(t), isActive(t), tabFor(t),
+          tabsForTile(t)
+        ]"
+        class="tile-shell"
+        :data-ddt="t.ddt ? '1' : '0'"
+        :class="{ 'is-active': isActive(t), 'is-flipped': isFlipped(t) }"
+        :style="tileStyle(t)"
+        @click.stop="onTileClick(t)"
+      >
+        <TileAnchor
+          :tile="t"
+          :flipped="isFlipped(t)"
+          :cell="isActive(t) ? activeCell : null"
+          :tab="tabFor(t)"
+          :tabs="tabsForTile(t)"
+          @tab-change="onTabChange(t, $event)"
+          @request-cover="flippedKey = null"
+        />
+      </div>
+    </div>
 
     <div class="hud">
       <div><strong>EWRM HUD</strong></div>
@@ -42,14 +42,12 @@
       <div>lastErr: {{ hud.err }}</div>
       <div>infra(nonzero): {{ infraCount }}</div>
       <div>activeCell: {{ activeCell ? 'yes' : 'no' }}</div>
-      <div>users: {{ presenceMarkers.size }}</div>
     </div>
   </div>
 </template>
 
 <script setup>
 import L from 'leaflet'
-import { io } from 'socket.io-client'
 import { ref, onMounted, onBeforeUnmount, watch, reactive, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { fetchViewport, fetchCell, resolveObject } from '../api/worldApi'
@@ -80,14 +78,6 @@ const ANCHOR_CACHE_MAX = 8000                 // hard cap (LRU)
 const ANCHOR_CACHE_TTL_MS = 30 * 60 * 1000    // 30 minutes since last seen
 const ANCHOR_CACHE_PRUNE_EVERY = 25           // prune every N viewport refreshes
 const anchorCacheSize = ref(0)
-
-const REALTIME_PATH = '/rt/'
-const PRESENCE_PANE = 'ewrmPresence'
-const PRESENCE_RADIUS = 6
-
-let socket = null
-let ownSocketId = null
-const presenceMarkers = new Map() // socketId -> L.circleMarker
 
 const mapEl = ref(null)
 const gridCanvasEl = ref(null)
@@ -142,14 +132,9 @@ function keyForTile(t) { return `${t.x}:${t.y}` }
 function tabFor(t) {
   const key = keyForTile(t)
   const tabs = tabsForTile(t)
-
   return tabByKey[key] || tabs[0].id
 }
-
-function onTabChange(t, tab) {
-  if (tab === 'cover') return
-  tabByKey[keyForTile(t)] = tab
-}
+function onTabChange(t, tab) { tabByKey[keyForTile(t)] = tab }
 
 // Keep the active anchor mounted even if it falls out of viewport anchor list
 const pinnedAnchor = ref(null)
@@ -197,236 +182,8 @@ const hud = reactive({
   nav: '—',
 })
 
-function screenScale() {
-  return map ? map.getZoomScale(map.getZoom(), 0) : 1
-}
-
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v))
-}
-
-/* ===== landscape helpers ===== */
-
-function hash2D(x, y) {
-  let h = x * 374761393 + y * 668265263
-  h = (h ^ (h >> 13)) * 1274126177
-  h = h ^ (h >> 16)
-  return (h >>> 0)
-}
-
-function terrainBlend(x, y) {
-  const n =
-    Math.sin(x * 0.23) +
-    Math.sin(y * 0.19) +
-    Math.sin((x + y) * 0.11)
-
-  return n
-}
-
-function emptyTileKind(x, y) {
-  const macro = macroTerrain(x, y)
-  const band = terrainBand(x, y)
-  const blend = terrainBlend(x, y)
-
-  const h = (hash2D(x, y) + Math.floor(blend * 18)) % 100
-
-
-  // ===== MACRO TERRAIN (large world features) =====
-
-  if (macro === 'mountain') {
-    if (h < 60) return 'stone'
-    if (h < 85) return 'scrub'
-    return 'dirt'
-  }
-
-  if (macro === 'upland') {
-    if (h < 60) return 'scrub'
-    if (h < 85) return 'grass'
-    return 'stone'
-  }
-
-  if (macro === 'basin') {
-    if (h < 60) return 'grass'
-    if (h < 80) return 'scrub'
-    return 'dirt'
-  }
-
-  if (macro === 'coast') {
-    if (h < 70) return 'sand'
-    return 'stone'
-  }
-
-  // ===== BAND TERRAIN (regional variation) =====
-
-  if (band === 'grass') {
-    if (h < 70) return 'grass'
-    if (h < 90) return 'scrub'
-    return 'dirt'
-  }
-
-  if (band === 'scrub') {
-    if (h < 60) return 'scrub'
-    if (h < 80) return 'dirt'
-    return 'stone'
-  }
-
-  if (band === 'sand') {
-    if (h < 80) return 'sand'
-    return 'stone'
-  }
-
-  if (band === 'stone') {
-    if (h < 70) return 'stone'
-    return 'scrub'
-  }
-
-  return 'grass'
-}
-
-function drawEmptyLandscapeTile(ctx, x, y, px, py, cellPx) {
-  const kind = emptyTileKind(x, y)
-
-  if (kind === 'grass') {
-    ctx.fillStyle = 'rgba(170, 186, 135, 0.32)'
-    ctx.fillRect(px, py, cellPx, cellPx)
-  } else if (kind === 'dirt') {
-    ctx.fillStyle = 'rgba(160, 136, 102, 0.28)'
-    ctx.fillRect(px, py, cellPx, cellPx)
-  } else if (kind === 'scrub') {
-    ctx.fillStyle = 'rgba(150, 165, 120, 0.24)'
-    ctx.fillRect(px, py, cellPx, cellPx)
-  } else if (kind === 'sand') {
-    ctx.fillStyle = 'rgba(196, 180, 126, 0.22)'
-    ctx.fillRect(px, py, cellPx, cellPx)
-  } else {
-    ctx.fillStyle = 'rgba(145, 145, 145, 0.16)'
-    ctx.fillRect(px, py, cellPx, cellPx)
-  }
-
-  // optional subtle speckle when zoomed in
-  if (cellPx >= 40) {
-    const h = hash2D(x, y)
-    const count = 6 + (h % 8)
-    ctx.fillStyle = 'rgba(0,0,0,0.06)'
-    for (let i = 0; i < count; i++) {
-      const dx = ((h >> (i % 16)) % 1000) / 1000
-      const dy = ((h >> ((i + 5) % 16)) % 1000) / 1000
-      ctx.fillRect(
-        px + dx * (cellPx - 3),
-        py + dy * (cellPx - 3),
-        2,
-        2
-      )
-    }
-  }
-}
-
-function macroTerrain(x, y) {
-  const nx = x * 0.0015
-  const ny = y * 0.0015
-
-  const v =
-    Math.sin(nx * 0.9) +
-    Math.sin(ny * 0.7) +
-    Math.sin((nx + ny) * 0.6)
-
-  if (v > 1.3) return 'mountain'
-  if (v > 0.5) return 'upland'
-  if (v > -0.6) return 'plain'
-  if (v > -1.2) return 'basin'
-  return 'coast'
-}
-
-function terrainBand(x, y) {
-  // very low frequency field
-  const nx = x * 0.004
-  const ny = y * 0.004
-
-  const v =
-    Math.sin(nx * 1.7) +
-    Math.sin(ny * 1.3) +
-    Math.sin((nx + ny) * 1.1)
-
-  if (v < -1.2) return 'sand'
-  if (v < -0.2) return 'scrub'
-  if (v < 0.8) return 'grass'
-  return 'stone'
-}
-
-function emptyTileLandmark(x, y) {
-  const h = hash2D(x, y) % 1000
-
-  // sparse: about 1.4% of empty tiles
-  if (h < 4) return 'pond'
-  if (h < 8) return 'ruin'
-  if (h < 14) return 'rocks'
-  if (h < 18) return 'shrub'
-  return null
-}
-
-function drawEmptyLandmark(ctx, x, y, px, py, cellPx) {
-  const kind = emptyTileLandmark(x, y)
-  if (!kind) return
-
-  // only draw details when tile is big enough on screen
-  if (cellPx < 28) return
-
-  const cx = px + cellPx * 0.5
-  const cy = py + cellPx * 0.5
-
-  if (kind === 'pond') {
-    ctx.fillStyle = 'rgba(110, 150, 180, 0.32)'
-    ctx.beginPath()
-    ctx.ellipse(cx, cy, cellPx * 0.22, cellPx * 0.16, 0, 0, Math.PI * 2)
-    ctx.fill()
-
-    ctx.strokeStyle = 'rgba(70, 110, 140, 0.24)'
-    ctx.lineWidth = 1
-    ctx.stroke()
-    return
-  }
-
-  if (kind === 'ruin') {
-    ctx.strokeStyle = 'rgba(90, 90, 90, 0.28)'
-    ctx.lineWidth = Math.max(1, cellPx * 0.03)
-    ctx.strokeRect(
-      px + cellPx * 0.28,
-      py + cellPx * 0.28,
-      cellPx * 0.44,
-      cellPx * 0.44
-    )
-
-    ctx.strokeRect(
-      px + cellPx * 0.38,
-      py + cellPx * 0.38,
-      cellPx * 0.10,
-      cellPx * 0.10
-    )
-    return
-  }
-
-  if (kind === 'rocks') {
-    ctx.fillStyle = 'rgba(95, 95, 95, 0.24)'
-    for (let i = 0; i < 4; i++) {
-      const ox = ((hash2D(x + i, y) % 100) / 100 - 0.5) * cellPx * 0.24
-      const oy = ((hash2D(x, y + i) % 100) / 100 - 0.5) * cellPx * 0.24
-      ctx.beginPath()
-      ctx.arc(cx + ox, cy + oy, cellPx * 0.06, 0, Math.PI * 2)
-      ctx.fill()
-    }
-    return
-  }
-
-  if (kind === 'shrub') {
-    ctx.fillStyle = 'rgba(80, 120, 70, 0.26)'
-    for (let i = 0; i < 3; i++) {
-      const ox = ((hash2D(x * 3 + i, y) % 100) / 100 - 0.5) * cellPx * 0.18
-      const oy = ((hash2D(x, y * 3 + i) % 100) / 100 - 0.5) * cellPx * 0.18
-      ctx.beginPath()
-      ctx.arc(cx + ox, cy + oy, cellPx * 0.05, 0, Math.PI * 2)
-      ctx.fill()
-    }
-  }
 }
 
 /* ===== anchor cache helpers (LRU + TTL) ===== */
@@ -460,7 +217,7 @@ function tileXYFromPointerEvent(e) {
   if (!map) return null
   const p = map.mouseEventToContainerPoint(e)
   const ll = map.containerPointToLatLng(p)
-  return latLngToTileXY(ll) // returns {x,y} in UI coords in your file
+  return latLngToTileXY(ll) // returns {x,y} in UI coords
 }
 
 /* ===== backend/ui y normalization ===== */
@@ -490,19 +247,6 @@ function latLngToTileXY(latlng) {
   const x = clamp(Math.floor(latlng.lng / WORLD.cellPx), 0, WORLD.cols - 1)
   const y = clamp(Math.floor((-latlng.lat) / WORLD.cellPx), 0, WORLD.rows - 1)
   return { x, y }
-}
-
-function latLngToTileHit(latlng) {
-  const rawX = latlng.lng / WORLD.cellPx
-  const rawY = (-latlng.lat) / WORLD.cellPx
-
-  const x = clamp(Math.floor(rawX), 0, WORLD.cols - 1)
-  const y = clamp(Math.floor(rawY), 0, WORLD.rows - 1)
-
-  const ox = clamp(rawX - x, 0, 1)
-  const oy = clamp(rawY - y, 0, 1)
-
-  return { x, y, ox, oy }
 }
 
 /* ===== infra helpers ===== */
@@ -619,6 +363,7 @@ function mountAnchorsIntoPane() {
   el.style.height = `${worldH}px`
   el.style.pointerEvents = 'none'
 
+  // Ensure it stays in pane even if Vue re-renders
   requestAnimationFrame(() => {
     const el2 = anchorLayerEl.value
     const pane2 = map?.getPane?.(ANCHOR_PANE)
@@ -627,19 +372,22 @@ function mountAnchorsIntoPane() {
   })
 }
 
-function anchorsAreInLeafletPane() {
-  const el = anchorLayerEl.value
-  if (!map || !el) return false
-  return el.parentNode === map.getPane(ANCHOR_PANE)
-}
-
-/* ===== Anchor scale + "camera" snapshot (layer space) ===== */
+/* ===== Anchor "camera" snapshot (layer space) ===== */
 
 // Measure how many *layer pixels* correspond to 1 tile at current zoom.
 function cellPxInLayer() {
   if (!map) return WORLD.cellPx
   const p0 = map.latLngToLayerPoint(tileTopLeftLatLng(0, 0))
   const p1 = map.latLngToLayerPoint(tileTopLeftLatLng(1, 0))
+  return Math.abs(p1.x - p0.x) || WORLD.cellPx
+}
+
+// Measure how many *container pixels* correspond to 1 tile at current zoom.
+// Used for canvas rendering (canvas is in container space).
+function cellPxInContainer() {
+  if (!map) return WORLD.cellPx
+  const p0 = map.latLngToContainerPoint(tileTopLeftLatLng(0, 0))
+  const p1 = map.latLngToContainerPoint(tileTopLeftLatLng(1, 0))
   return Math.abs(p1.x - p0.x) || WORLD.cellPx
 }
 
@@ -665,7 +413,7 @@ function updateAnchorCameraLayer() {
   camL.px0 = p0.x
   camL.py0 = p0.y
 
-  // effective tile size in layer pixels (mobile-safe)
+  // effective tile size in layer pixels
   camL.cell = cellPxInLayer()
 }
 
@@ -782,36 +530,19 @@ function makeBrickPattern() {
 function tileStyle(t) {
   if (!map) return { display: 'none' }
 
-  const inPane = anchorsAreInLeafletPane()
+  // Always in pane: affine math in layer space (no per-anchor Leaflet calls)
+  const cell = camL.cell
+  const px = camL.px0 + (t.x - camL.xmin) * cell
+  const py = camL.py0 + (t.y - camL.ymin) * cell
 
-  // FAST PATH: affine math in layer space (no Leaflet calls per anchor)
-  if (inPane) {
-    const cell = camL.cell
-    const px = camL.px0 + (t.x - camL.xmin) * cell
-    const py = camL.py0 + (t.y - camL.ymin) * cell
-
-    const w = Math.max(1, Number(t.w || 1)) * cell
-    const h = Math.max(1, Number(t.h || 1)) * cell
-
-    return {
-      transform: `translate3d(${Math.round(px)}px, ${Math.round(py)}px, 0)`,
-      width: `${Math.round(w)}px`,
-      height: `${Math.round(h)}px`,
-      pointerEvents: t?.flippable === false ? 'none' : 'auto',
-    }
-  }
-
-  // Fallback (should be rare): container space + manual scale
-  const p = map.latLngToContainerPoint(tileTopLeftLatLng(t.x, t.y))
-  const s = screenScale()
-  const w = Math.max(1, Number(t.w || 1)) * WORLD.cellPx * s
-  const h = Math.max(1, Number(t.h || 1)) * WORLD.cellPx * s
+  const w = Math.max(1, Number(t.w || 1)) * cell
+  const h = Math.max(1, Number(t.h || 1)) * cell
 
   return {
-    transform: `translate3d(${Math.round(p.x)}px, ${Math.round(p.y)}px, 0)`,
+    transform: `translate3d(${Math.round(px)}px, ${Math.round(py)}px, 0)`,
     width: `${Math.round(w)}px`,
     height: `${Math.round(h)}px`,
-    pointerEvents: 'auto',
+    pointerEvents: t?.flippable === false ? 'none' : 'auto',
   }
 }
 
@@ -873,7 +604,7 @@ async function refreshViewport() {
         cover: t.cover || null,
         object: t.object || null,
         flippable: (t.flippable !== undefined) ? !!t.flippable : undefined,
-        ddt: !!t.ddt, // ✅ IMPORTANT: store DDT
+        ddt: !!t.ddt,
         lastSeenMs: now,
       }
       touchAnchor(k, a)
@@ -908,7 +639,7 @@ async function refreshViewport() {
   }
 }
 
-/* ===== API: infra (best) ===== */
+/* ===== API: infra ===== */
 
 const infraFetchedRects = [] // {xmin,xmax,ymin,ymax} in UI coords
 
@@ -1047,16 +778,14 @@ async function refreshActiveCellIfNeeded() {
 
     activeCell.value = data
 
-    // ✅ Pin the active anchor so it stays mounted even if viewport anchors refresh.
-    // ✅ Also enrich the anchor cache with the FULL object so reopen uses full tabs immediately.
+    // Pin the active anchor so it stays mounted even if viewport anchors refresh.
     if (data?.anchor) {
       const ax = Number(data.anchor.x)
       const ay = Number(data.anchor.y)
       const aw = Number(data.anchor.w || 1)
       const ah = Number(data.anchor.h || 1)
-      const kk = `${ax}:${ay}`
 
-      const fullAnchor = {
+      pinnedAnchor.value = {
         x: ax,
         y: ay,
         w: aw,
@@ -1065,32 +794,7 @@ async function refreshActiveCellIfNeeded() {
         object: data.object || null,
         ddt: !!data.ddt,
         flippable: (data.flippable !== undefined) ? !!data.flippable : undefined,
-        lastSeenMs: Date.now(),
       }
-
-      // Keep pinned anchor in sync
-      pinnedAnchor.value = fullAnchor
-
-      // Enrich anchor cache with the full object
-      touchAnchor(kk, fullAnchor)
-      anchorCacheSize.value = anchorCache.size
-
-      // Update the currently rendered anchors list too
-      anchors.value = anchors.value.map((a) =>
-        `${a.x}:${a.y}` === kk
-          ? {
-              ...a,
-              cover: fullAnchor.cover,
-              object: fullAnchor.object,
-              ddt: fullAnchor.ddt,
-              flippable: fullAnchor.flippable,
-              w: fullAnchor.w,
-              h: fullAnchor.h,
-            }
-          : a
-      )
-
-      if (!tabByKey[kk]) tabByKey[kk] = 'embed'
     } else {
       pinnedAnchor.value = null
     }
@@ -1105,7 +809,7 @@ async function refreshActiveCellIfNeeded() {
 /* ===== deep-link centering ===== */
 
 async function centerDeepLinkIfNeeded() {
-  if (!map) return null
+  if (!map) return
 
   if (route.name === 'object') {
     const bundle = String(route.params.bundle)
@@ -1116,10 +820,10 @@ async function centerDeepLinkIfNeeded() {
       const ayUi = backendYToUiY(Number(resolved.anchor.y))
       router.replace({ name: 'tile', params: { z: WORLD.z, x: ax, y: ayUi } })
     }
-    return null
+    return
   }
 
-  if (route.name !== 'tile') return null
+  if (route.name !== 'tile') return
 
   const x = clamp(parseInt(route.params.x, 10), 0, WORLD.cols - 1)
   const yUi = clamp(parseInt(route.params.y, 10), 0, WORLD.rows - 1)
@@ -1134,10 +838,8 @@ async function centerDeepLinkIfNeeded() {
     const ayUi = backendYToUiY(ayBackend)
 
     map.setView(tileCenterLatLng(ax, ayUi, aw, ah), map.getZoom(), { animate: false })
-    return data
   } catch (_) {
     map.setView(tileCenterLatLng(x, yUi, 1, 1), map.getZoom(), { animate: false })
-    return null
   }
 }
 
@@ -1151,29 +853,10 @@ function resizeCanvas() {
   const rect = host.getBoundingClientRect()
   const dpr = window.devicePixelRatio || 1
 
-  const cssW = Math.round(rect.width)
-  const cssH = Math.round(rect.height)
-  const pxW = Math.round(cssW * dpr)
-  const pxH = Math.round(cssH * dpr)
-
-  // Avoid resetting canvas unless dimensions actually changed.
-  if (
-    canvas.width === pxW &&
-    canvas.height === pxH &&
-    canvas.style.width === `${cssW}px` &&
-    canvas.style.height === `${cssH}px`
-  ) {
-    if (!ctx) {
-      ctx = canvas.getContext('2d')
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    }
-    return
-  }
-
-  canvas.style.width = `${cssW}px`
-  canvas.style.height = `${cssH}px`
-  canvas.width = pxW
-  canvas.height = pxH
+  canvas.style.width = `${Math.round(rect.width)}px`
+  canvas.style.height = `${Math.round(rect.height)}px`
+  canvas.width = Math.round(rect.width * dpr)
+  canvas.height = Math.round(rect.height * dpr)
 
   ctx = canvas.getContext('2d')
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -1182,7 +865,7 @@ function resizeCanvas() {
 function drawGrid() {
   if (!map || !ctx) return
 
-  const SHOW_GRID = false
+  const SHOW_GRID = true
 
   const canvas = gridCanvasEl.value
   const w = canvas.clientWidth
@@ -1190,8 +873,8 @@ function drawGrid() {
 
   ctx.clearRect(0, 0, w, h)
 
-  const s = screenScale()
-  const cellPxScreen = WORLD.cellPx * s
+  // No custom scaling: measure current tile size in container pixels
+  const cellPxScreen = cellPxInContainer()
 
   const { xmin, xmax, ymin, ymax } = tileBoundsWithPad_UI(PAD_DRAW)
 
@@ -1212,16 +895,11 @@ function drawGrid() {
   for (let y = ymin; y <= ymax; y++) {
     const py = py0 + (y - ymin) * cellPxScreen
     const rowBase = y * WORLD.cols
-
     for (let x = xmin; x <= xmax; x++) {
-      const px = px0 + (x - xmin) * cellPxScreen
       const role = infraGrid[rowBase + x]
+      if (role === ROLE.NONE) continue
 
-      if (role === ROLE.NONE) {
-        drawEmptyLandscapeTile(ctx, x, y, px, py, cellPxScreen)
-        drawEmptyLandmark(ctx, x, y, px, py, cellPxScreen)
-        continue
-      }
+      const px = px0 + (x - xmin) * cellPxScreen
 
       if (role === ROLE.YBR) {
         ctx.fillStyle = 'rgba(244, 197, 66, 0.70)'
@@ -1300,30 +978,15 @@ async function handleRoutePipeline() {
     !hasInitialized ||
     (source !== 'click' && (route.name === 'tile' || route.name === 'object'))
 
-  let deepLinkCell = null
   if (isDeepLinkCenterCase) {
-    deepLinkCell = await centerDeepLinkIfNeeded()
+    await centerDeepLinkIfNeeded()
   }
 
   if (source !== 'click' && route.name === 'tile') {
     const rx = Number(route.params.x)
     const ry = Number(route.params.y)
-
     if (Number.isFinite(rx) && Number.isFinite(ry)) {
-      // Reuse the cell data fetched during centering when available.
-      let data = deepLinkCell
-
-      if (!data) {
-        const yBackend = uiYToBackendY(ry)
-        try {
-          data = await fetchCell({ x: rx, y: yBackend })
-        } catch (_) {
-          data = null
-        }
-      }
-
-      const canFlip = data?.flippable === true
-      flippedKey.value = canFlip ? `${rx}:${ry}` : null
+      flippedKey.value = `${rx}:${ry}`
     }
   }
 
@@ -1347,8 +1010,8 @@ function installDDTDragGating() {
 
   const container = map.getContainer()
 
-ddtPointerDownHandler = (e) => {
-  // If the interaction is inside tile UI, never start map dragging.
+  ddtPointerDownHandler = (e) => {
+    // If the interaction is inside tile UI, never start map dragging.
     const noDrag = e.target?.closest?.(
       '.tile-ui, .tile-tabs, .tile-body, .tile-panel, iframe, a, button, input, textarea, select'
     )
@@ -1356,6 +1019,7 @@ ddtPointerDownHandler = (e) => {
       map.dragging.disable()
       return
     }
+
     // 1) DDT anchor tiles (Drupal field_ddt)
     const shell = e.target?.closest?.('.tile-shell')
     const isDDTAnchor = !!shell && shell.dataset.ddt === '1'
@@ -1397,149 +1061,6 @@ function uninstallDDTDragGating() {
   ddtPointerUpHandler = null
 }
 
-function emitPresenceJoin(x, y, ox = 0.5, oy = 0.5) {
-  if (!socket) return
-  socket.emit('presence:join', { x, y, ox, oy })
-}
-
-function emitPresenceMove(x, y, ox = 0.5, oy = 0.5) {
-  if (!socket) return
-  socket.emit('presence:move', { x, y, ox, oy })
-}
-
-/* ===== realtime presence ===== */
-
-function ensurePresencePane() {
-  if (!map) return null
-  const pane = map.getPane(PRESENCE_PANE) || map.createPane(PRESENCE_PANE)
-  pane.style.zIndex = '550'
-  pane.style.pointerEvents = 'none'
-  return pane
-}
-
-function markerLatLngForTile(x, y, ox = 0.5, oy = 0.5) {
-  const lng = (x + ox) * WORLD.cellPx
-  const lat = -(y + oy) * WORLD.cellPx
-  return L.latLng(lat, lng)
-}
-
-function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
-  if (!map) return
-  if (!id) return
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return
-  if (id === ownSocketId) return
-
-  ensurePresencePane()
-
-  const ll = markerLatLngForTile(x, y, ox, oy)
-  let marker = presenceMarkers.get(id)
-
-  if (!marker) {
-    marker = L.circleMarker(ll, {
-      pane: PRESENCE_PANE,
-      radius: PRESENCE_RADIUS,
-      stroke: true,
-      weight: 1,
-      opacity: 0.9,
-      fillOpacity: 0.8,
-    }).addTo(map)
-
-    presenceMarkers.set(id, marker)
-    return
-  }
-
-  marker.setLatLng(ll)
-}
-
-function removePresenceMarker(id) {
-  const marker = presenceMarkers.get(id)
-  if (!marker) return
-  map?.removeLayer(marker)
-  presenceMarkers.delete(id)
-}
-
-function clearPresenceMarkers() {
-  for (const marker of presenceMarkers.values()) {
-    map?.removeLayer(marker)
-  }
-  presenceMarkers.clear()
-}
-
-function currentRouteTile() {
-  if (route.name !== 'tile') return null
-
-  const x = Number(route.params.x)
-  const y = Number(route.params.y)
-
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null
-
-  return {
-    x: clamp(x, 0, WORLD.cols - 1),
-    y: clamp(y, 0, WORLD.rows - 1),
-  }
-}
-
-function emitPresenceJoinForCurrentRoute(ox = 0.5, oy = 0.5) {
-  const t = currentRouteTile()
-  if (!t) return
-  emitPresenceJoin(t.x, t.y, ox, oy)
-}
-
-function emitPresenceMoveForCurrentRoute(ox = 0.5, oy = 0.5) {
-  const t = currentRouteTile()
-  if (!t) return
-  emitPresenceMove(t.x, t.y, ox, oy)
-}
-
-function initRealtime() {
-  if (socket) return
-
-  socket = io(window.location.origin, {
-    path: REALTIME_PATH,
-    transports: ['websocket'],
-  })
-
-  socket.on('connect', () => {
-    ownSocketId = socket.id || null
-    emitPresenceJoinForCurrentRoute()
-  })
-
-  socket.on('disconnect', () => {
-    ownSocketId = null
-    clearPresenceMarkers()
-  })
-
-  socket.on('presence:snapshot', (payload) => {
-    const users = Array.isArray(payload?.users) ? payload.users : []
-    clearPresenceMarkers()
-    for (const user of users) {
-      upsertPresenceMarker(user)
-    }
-  })
-
-  socket.on('presence:update', (payload) => {
-    upsertPresenceMarker(payload || {})
-  })
-
-  socket.on('presence:leave', (payload) => {
-    if (!payload?.id) return
-    removePresenceMarker(payload.id)
-  })
-}
-
-function destroyRealtime() {
-  if (!socket) return
-  socket.off('connect')
-  socket.off('disconnect')
-  socket.off('presence:snapshot')
-  socket.off('presence:update')
-  socket.off('presence:leave')
-  socket.disconnect()
-  socket = null
-  ownSocketId = null
-  clearPresenceMarkers()
-}
-
 /* ===== lifecycle ===== */
 
 let ro = null
@@ -1551,38 +1072,39 @@ onMounted(async () => {
 
   await new Promise(requestAnimationFrame)
 
-  const containerWidth = mapEl.value.getBoundingClientRect().width
-  const TILE_PX = WORLD.cellPx
-  const paddingPx = 32
-
-  const INITIAL_MOBILE_SCALE = 0.75
-  const isMobile = window.matchMedia('(pointer: coarse)').matches
-
-  const lockedZoom = isMobile
-    ? Math.log2(containerWidth / ((2 * TILE_PX) + paddingPx)) + Math.log2(INITIAL_MOBILE_SCALE)
-    : 0
-
   map = L.map(mapEl.value, {
     crs: L.CRS.Simple,
+
+    // Smooth pinch/scroll zoom (no custom scaling hacks)
     zoomSnap: 0,
     zoomDelta: 0.25,
-    zoom: lockedZoom,
-    minZoom: lockedZoom,
-    maxZoom: lockedZoom,
+
+    // ✅ allow user zooming (pinch zoom)
+    zoom: 0,
+    minZoom: -2,
+    maxZoom: 3,
+
     dragging: true,
     inertia: true,
     inertiaThreshold: 0,
     inertiaDeceleration: 900,
     inertiaMaxSpeed: 3500,
     easeLinearity: 0.12,
-    maxBoundsViscosity: 0.5,
+
+    // ✅ STRONG RECOMMENDATION: hard world edge (prevents stretchy overscroll)
+    maxBoundsViscosity: 1.0,
+
     zoomControl: false,
     attributionControl: false,
-    scrollWheelZoom: false,
-    doubleClickZoom: false,
-    touchZoom: false,
+
+    // ✅ enable zoom inputs
+    scrollWheelZoom: true,     // desktop
+    doubleClickZoom: true,     // desktop
+    touchZoom: true,           // mobile pinch
     boxZoom: false,
     keyboard: false,
+
+    // Keep animations off for stability/perf (your current choice)
     zoomAnimation: false,
     fadeAnimation: false,
     markerZoomAnimation: false,
@@ -1592,18 +1114,17 @@ onMounted(async () => {
   installDDTDragGating()
 
   map.setMaxBounds(bounds)
-  map.setView(L.latLng(-worldHeight / 2, worldWidth / 2), lockedZoom, { animate: false })
 
+  // Start centered in the world
+  map.setView(L.latLng(-worldHeight / 2, worldWidth / 2), 0, { animate: false })
+
+  // Anchors live in a Leaflet pane so they inherit Leaflet transforms
   mountAnchorsIntoPane()
-  ensurePresencePane()
-  initRealtime()
 
   resizeCanvas()
   ro = new ResizeObserver(() => {
     resizeCanvas()
-    updateAnchorCameraLayer()
-    drawGrid()
-    updateHud()
+    scheduleFrame()
   })
   ro.observe(mapEl.value)
 
@@ -1643,17 +1164,11 @@ onMounted(async () => {
     const target = e.originalEvent?.target
     if (target && target.closest && target.closest('.tile-shell')) return
 
-    // ✅ If a tile is open, don't close it when clicking empty space.
-    // Optional: just pan to where the user clicked.
-    if (flippedKey.value) {
-      // map.panTo(e.latlng, { animate: false })
-      return
-    }
+    // If a tile is open, don't close it when clicking empty space.
+    if (flippedKey.value) return
 
     // If no tile is open, clicking empty space can navigate.
-const { x, y, ox, oy } = latLngToTileHit(e.latlng)
-
-    emitPresenceMove(x, y, ox, oy)
+    const { x, y } = latLngToTileXY(e.latlng)
 
     pendingNavSource = 'click'
     router.push({ name: 'tile', params: { z: WORLD.z, x, y } })
@@ -1672,19 +1187,11 @@ watch(
 )
 
 watch(
-  () => [route.name, route.params.x, route.params.y],
-  () => {
-    // no-op for now
-  }
-)
-
-watch(
   () => flippedKey.value,
   () => refreshActiveCellIfNeeded()
 )
 
 onBeforeUnmount(() => {
-  // abort requests
   try { cellAbort?.abort() } catch (_) {}
   try { viewportAbort?.abort() } catch (_) {}
 
@@ -1696,10 +1203,7 @@ onBeforeUnmount(() => {
 
   ro?.disconnect()
 
-  // ✅ clean DDT gating listeners
   uninstallDDTDragGating()
-
-  destroyRealtime()
 
   map?.remove()
   map = null
@@ -1738,15 +1242,14 @@ onBeforeUnmount(() => {
   will-change: transform;
 }
 
-.tile-shell.is-active {
-  outline: 4px solid rgba(0, 0, 0, 0.6);
-  outline-offset: -4px;
-  z-index: 5;
-}
-
 .tile-shell { z-index: 1; }
 .tile-shell.is-active { z-index: 50; }
 .tile-shell.is-flipped { z-index: 100; }
+
+.tile-shell.is-active {
+  outline: 4px solid rgba(0, 0, 0, 0.6);
+  outline-offset: -4px;
+}
 
 .hud {
   position: fixed;
