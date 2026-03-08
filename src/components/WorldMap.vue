@@ -4,32 +4,32 @@
 
     <canvas ref="gridCanvasEl" class="grid-canvas"></canvas>
 
- <div ref="anchorLayerEl" class="anchor-layer">
-   <div
-     v-for="t in renderAnchors"
-     :key="`${t.x}:${t.y}`"
-     v-memo="[
-       t.x, t.y, t.w, t.h, t.cover, t.flippable, t.ddt,
-       isFlipped(t), isActive(t), tabFor(t),
-       tabsForTile(t)
-     ]"
-     class="tile-shell"
-     :data-ddt="t.ddt ? '1' : '0'"
-     :class="{ 'is-active': isActive(t), 'is-flipped': isFlipped(t) }"
-     :style="tileStyle(t)"
-     @click.stop="onTileClick(t)"
-   >
-     <TileAnchor
-       :tile="t"
-       :flipped="isFlipped(t)"
-       :cell="isActive(t) ? activeCell : null"
-       :tab="tabFor(t)"
-       :tabs="tabsForTile(t)"
-       @tab-change="onTabChange(t, $event)"
-       @request-cover="flippedKey = null"
-     />
-   </div>
- </div>
+    <div ref="anchorLayerEl" class="anchor-layer">
+      <div
+        v-for="t in renderAnchors"
+        :key="`${t.x}:${t.y}`"
+        v-memo="[
+          t.x, t.y, t.w, t.h, t.cover, t.flippable, t.ddt,
+          isFlipped(t), isActive(t), tabFor(t),
+          tabsForTile(t)
+        ]"
+        class="tile-shell"
+        :data-ddt="t.ddt ? '1' : '0'"
+        :class="{ 'is-active': isActive(t), 'is-flipped': isFlipped(t) }"
+        :style="tileStyle(t)"
+        @click.stop="onTileClick(t, $event)"
+      >
+        <TileAnchor
+          :tile="t"
+          :flipped="isFlipped(t)"
+          :cell="isActive(t) ? activeCell : null"
+          :tab="tabFor(t)"
+          :tabs="tabsForTile(t)"
+          @tab-change="onTabChange(t, $event)"
+          @request-cover="flippedKey = null"
+        />
+      </div>
+    </div>
 
     <div class="hud">
       <div><strong>EWRM HUD</strong></div>
@@ -42,7 +42,7 @@
       <div>lastErr: {{ hud.err }}</div>
       <div>infra(nonzero): {{ infraCount }}</div>
       <div>activeCell: {{ activeCell ? 'yes' : 'no' }}</div>
-      <div>users: {{ presenceMarkers.size }}</div>
+      <div>users: {{ presenceCount }}</div>
     </div>
   </div>
 </template>
@@ -76,18 +76,47 @@ const INFRA_MOVE_THROTTLE_MS = 250
 const ROLE = { NONE: 0, ROAD: 1, YBR: 2, PLAZA: 3 }
 
 // Anchor cache hygiene (future-proof)
-const ANCHOR_CACHE_MAX = 8000                 // hard cap (LRU)
-const ANCHOR_CACHE_TTL_MS = 30 * 60 * 1000    // 30 minutes since last seen
-const ANCHOR_CACHE_PRUNE_EVERY = 25           // prune every N viewport refreshes
+const ANCHOR_CACHE_MAX = 8000
+const ANCHOR_CACHE_TTL_MS = 30 * 60 * 1000
+const ANCHOR_CACHE_PRUNE_EVERY = 25
 const anchorCacheSize = ref(0)
 
 const REALTIME_PATH = '/rt/'
 const PRESENCE_PANE = 'ewrmPresence'
-const PRESENCE_RADIUS = 6
+const PRESENCE_RADIUS = 18
+
+const PRESENCE_STYLE_SELF = {
+  pane: PRESENCE_PANE,
+  radius: PRESENCE_RADIUS,
+  color: '#111111',
+  fillColor: '#ff5a36',
+  fillOpacity: 0.95,
+  weight: 1,
+  opacity: 1,
+}
+
+const PRESENCE_STYLE_OTHER = {
+  pane: PRESENCE_PANE,
+  radius: PRESENCE_RADIUS,
+  color: '#111111',
+  fillColor: '#00b7ff',
+  fillOpacity: 0.9,
+  weight: 1,
+  opacity: 1,
+}
 
 let socket = null
 let ownSocketId = null
+let lastViewportRegion = null
 const presenceMarkers = new Map() // socketId -> L.circleMarker
+const presenceCount = ref(0)
+
+const selfPresence = reactive({
+  x: null,
+  y: null,
+  ox: 0.5,
+  oy: 0.5,
+})
 
 const mapEl = ref(null)
 const gridCanvasEl = ref(null)
@@ -125,7 +154,6 @@ const TAB_SETS = {
 }
 
 function bundleForTile(t) {
-  // Prefer activeCell bundle for the active tile.
   if (isActive(t) && activeCell.value?.object?.bundle) return activeCell.value.object.bundle
   return t?.object?.bundle || 'default'
 }
@@ -142,7 +170,6 @@ function keyForTile(t) { return `${t.x}:${t.y}` }
 function tabFor(t) {
   const key = keyForTile(t)
   const tabs = tabsForTile(t)
-
   return tabByKey[key] || tabs[0].id
 }
 
@@ -178,7 +205,7 @@ const renderAnchors = computed(() => {
 
 // 1024*1024 = 1,048,576 bytes (~1MB)
 const infraGrid = new Uint8Array(WORLD.cols * WORLD.rows)
-const infraCount = ref(0) // HUD-only: count of non-zero cells
+const infraCount = ref(0)
 
 // ACTIVE CELL payload
 const activeCell = ref(null)
@@ -186,7 +213,7 @@ let cellAbort = null
 
 let hasInitialized = false
 let didMoveSinceDown = false
-let pendingNavSource = null // 'click' | null
+let pendingNavSource = null
 let isMoving = false
 
 const hud = reactive({
@@ -230,9 +257,6 @@ function emptyTileKind(x, y) {
 
   const h = (hash2D(x, y) + Math.floor(blend * 18)) % 100
 
-
-  // ===== MACRO TERRAIN (large world features) =====
-
   if (macro === 'mountain') {
     if (h < 60) return 'stone'
     if (h < 85) return 'scrub'
@@ -255,8 +279,6 @@ function emptyTileKind(x, y) {
     if (h < 70) return 'sand'
     return 'stone'
   }
-
-  // ===== BAND TERRAIN (regional variation) =====
 
   if (band === 'grass') {
     if (h < 70) return 'grass'
@@ -303,7 +325,6 @@ function drawEmptyLandscapeTile(ctx, x, y, px, py, cellPx) {
     ctx.fillRect(px, py, cellPx, cellPx)
   }
 
-  // optional subtle speckle when zoomed in
   if (cellPx >= 40) {
     const h = hash2D(x, y)
     const count = 6 + (h % 8)
@@ -338,7 +359,6 @@ function macroTerrain(x, y) {
 }
 
 function terrainBand(x, y) {
-  // very low frequency field
   const nx = x * 0.004
   const ny = y * 0.004
 
@@ -355,8 +375,6 @@ function terrainBand(x, y) {
 
 function emptyTileLandmark(x, y) {
   const h = hash2D(x, y) % 1000
-
-  // sparse: about 1.4% of empty tiles
   if (h < 4) return 'pond'
   if (h < 8) return 'ruin'
   if (h < 14) return 'rocks'
@@ -367,8 +385,6 @@ function emptyTileLandmark(x, y) {
 function drawEmptyLandmark(ctx, x, y, px, py, cellPx) {
   const kind = emptyTileLandmark(x, y)
   if (!kind) return
-
-  // only draw details when tile is big enough on screen
   if (cellPx < 28) return
 
   const cx = px + cellPx * 0.5
@@ -435,7 +451,6 @@ function anchorKey(x, yUi) {
   return `${x}:${yUi}`
 }
 
-// LRU touch: move entry to the end (most recently used)
 function touchAnchor(key, value) {
   anchorCache.delete(key)
   anchorCache.set(key, value)
@@ -460,7 +475,7 @@ function tileXYFromPointerEvent(e) {
   if (!map) return null
   const p = map.mouseEventToContainerPoint(e)
   const ll = map.containerPointToLatLng(p)
-  return latLngToTileXY(ll) // returns {x,y} in UI coords in your file
+  return latLngToTileXY(ll)
 }
 
 /* ===== backend/ui y normalization ===== */
@@ -518,9 +533,6 @@ function roleToByte(role) {
   return ROLE.NONE
 }
 
-/**
- * Rect in UI tile coords
- */
 function tileBoundsWithPad_UI(pad) {
   if (!map) return { xmin: 0, xmax: 0, ymin: 0, ymax: 0 }
 
@@ -562,13 +574,25 @@ function isFlipped(t) {
   return flippedKey.value === `${t.x}:${t.y}`
 }
 
-async function handleTileClick(t) {
+async function handleTileClick(t, event = null) {
   if (didMoveSinceDown) return
+
+  let ox = 0.5
+  let oy = 0.5
+
+  if (event && map) {
+    const ll = map.mouseEventToLatLng(event)
+    const hit = latLngToTileHit(ll)
+    ox = hit.ox
+    oy = hit.oy
+  }
 
   const k = `${t.x}:${t.y}`
   const activeK = activeKeyFromRoute()
 
   if (activeK === k) {
+    setSelfPresence(t.x, t.y, ox, oy)
+
     const willClose = flippedKey.value === k
     flippedKey.value = willClose ? null : k
 
@@ -582,14 +606,16 @@ async function handleTileClick(t) {
     return
   }
 
+  emitPresenceMove(t.x, t.y, ox, oy)
+
   flippedKey.value = k
   pendingNavSource = 'click'
   router.push({ name: 'tile', params: { z: WORLD.z, x: t.x, y: t.y } })
 }
 
-function onTileClick(t) {
+function onTileClick(t, event) {
   if (t?.flippable === false) return
-  handleTileClick(t)
+  handleTileClick(t, event)
 }
 
 /* ===== leaflet pane mounting ===== */
@@ -605,10 +631,8 @@ function mountAnchorsIntoPane() {
   pane.style.zIndex = '600'
   pane.style.pointerEvents = 'none'
 
-  // Put anchor layer in the pane so it shares map transforms
   if (el.parentNode !== pane) pane.appendChild(el)
 
-  // IMPORTANT: world-sized container (avoids mobile layout weirdness)
   const worldW = WORLD.cols * WORLD.cellPx
   const worldH = WORLD.rows * WORLD.cellPx
 
@@ -633,9 +657,8 @@ function anchorsAreInLeafletPane() {
   return el.parentNode === map.getPane(ANCHOR_PANE)
 }
 
-/* ===== Anchor scale + "camera" snapshot (layer space) ===== */
+/* ===== Anchor scale + camera snapshot ===== */
 
-// Measure how many *layer pixels* correspond to 1 tile at current zoom.
 function cellPxInLayer() {
   if (!map) return WORLD.cellPx
   const p0 = map.latLngToLayerPoint(tileTopLeftLatLng(0, 0))
@@ -643,7 +666,6 @@ function cellPxInLayer() {
   return Math.abs(p1.x - p0.x) || WORLD.cellPx
 }
 
-// Layer-space camera snapshot (computed once per frame)
 const camL = {
   xmin: 0,
   ymin: 0,
@@ -655,21 +677,18 @@ const camL = {
 function updateAnchorCameraLayer() {
   if (!map) return
 
-  // top-left visible tile (no pad)
   const ui = tileBoundsWithPad_UI(0)
   camL.xmin = ui.xmin
   camL.ymin = ui.ymin
 
-  // origin in layer pixels for that tile
   const p0 = map.latLngToLayerPoint(tileTopLeftLatLng(ui.xmin, ui.ymin))
   camL.px0 = p0.x
   camL.py0 = p0.y
 
-  // effective tile size in layer pixels (mobile-safe)
   camL.cell = cellPxInLayer()
 }
 
-/* ===== infra visuals: gravel + brick patterns ===== */
+/* ===== infra visuals ===== */
 
 let gravelPattern = null
 let brickPattern = null
@@ -784,7 +803,6 @@ function tileStyle(t) {
 
   const inPane = anchorsAreInLeafletPane()
 
-  // FAST PATH: affine math in layer space (no Leaflet calls per anchor)
   if (inPane) {
     const cell = camL.cell
     const px = camL.px0 + (t.x - camL.xmin) * cell
@@ -801,7 +819,6 @@ function tileStyle(t) {
     }
   }
 
-  // Fallback (should be rare): container space + manual scale
   const p = map.latLngToContainerPoint(tileTopLeftLatLng(t.x, t.y))
   const s = screenScale()
   const w = Math.max(1, Number(t.w || 1)) * WORLD.cellPx * s
@@ -829,7 +846,7 @@ function updateHud() {
   hud.nav = pendingNavSource || '—'
 }
 
-/* ===== API: anchors (LRU+TTL cache) ===== */
+/* ===== API: anchors ===== */
 
 async function refreshViewport() {
   if (!map) return
@@ -873,7 +890,7 @@ async function refreshViewport() {
         cover: t.cover || null,
         object: t.object || null,
         flippable: (t.flippable !== undefined) ? !!t.flippable : undefined,
-        ddt: !!t.ddt, // ✅ IMPORTANT: store DDT
+        ddt: !!t.ddt,
         lastSeenMs: now,
       }
       touchAnchor(k, a)
@@ -908,9 +925,9 @@ async function refreshViewport() {
   }
 }
 
-/* ===== API: infra (best) ===== */
+/* ===== API: infra ===== */
 
-const infraFetchedRects = [] // {xmin,xmax,ymin,ymax} in UI coords
+const infraFetchedRects = []
 
 function rectCovers(a, b) {
   return a.xmin <= b.xmin && a.xmax >= b.xmax && a.ymin <= b.ymin && a.ymax >= b.ymax
@@ -1047,8 +1064,6 @@ async function refreshActiveCellIfNeeded() {
 
     activeCell.value = data
 
-    // ✅ Pin the active anchor so it stays mounted even if viewport anchors refresh.
-    // ✅ Also enrich the anchor cache with the FULL object so reopen uses full tabs immediately.
     if (data?.anchor) {
       const ax = Number(data.anchor.x)
       const ay = Number(data.anchor.y)
@@ -1068,14 +1083,11 @@ async function refreshActiveCellIfNeeded() {
         lastSeenMs: Date.now(),
       }
 
-      // Keep pinned anchor in sync
       pinnedAnchor.value = fullAnchor
 
-      // Enrich anchor cache with the full object
       touchAnchor(kk, fullAnchor)
       anchorCacheSize.value = anchorCache.size
 
-      // Update the currently rendered anchors list too
       anchors.value = anchors.value.map((a) =>
         `${a.x}:${a.y}` === kk
           ? {
@@ -1156,7 +1168,6 @@ function resizeCanvas() {
   const pxW = Math.round(cssW * dpr)
   const pxH = Math.round(cssH * dpr)
 
-  // Avoid resetting canvas unless dimensions actually changed.
   if (
     canvas.width === pxW &&
     canvas.height === pxH &&
@@ -1279,10 +1290,7 @@ function scheduleFrame() {
   if (raf) return
   raf = requestAnimationFrame(() => {
     raf = 0
-
-    // ONE snapshot per frame for anchor layout (no per-anchor Leaflet calls)
     updateAnchorCameraLayer()
-
     drawGrid()
     updateHud()
   })
@@ -1310,7 +1318,6 @@ async function handleRoutePipeline() {
     const ry = Number(route.params.y)
 
     if (Number.isFinite(rx) && Number.isFinite(ry)) {
-      // Reuse the cell data fetched during centering when available.
       let data = deepLinkCell
 
       if (!data) {
@@ -1335,7 +1342,7 @@ async function handleRoutePipeline() {
   scheduleFrame()
 }
 
-/* ===== DDT Drag gating (CLEAN) ===== */
+/* ===== DDT Drag gating ===== */
 
 let ddtPointerDownHandler = null
 let ddtPointerUpHandler = null
@@ -1347,8 +1354,7 @@ function installDDTDragGating() {
 
   const container = map.getContainer()
 
-ddtPointerDownHandler = (e) => {
-  // If the interaction is inside tile UI, never start map dragging.
+  ddtPointerDownHandler = (e) => {
     const noDrag = e.target?.closest?.(
       '.tile-ui, .tile-tabs, .tile-body, .tile-panel, iframe, a, button, input, textarea, select'
     )
@@ -1356,11 +1362,10 @@ ddtPointerDownHandler = (e) => {
       map.dragging.disable()
       return
     }
-    // 1) DDT anchor tiles (Drupal field_ddt)
+
     const shell = e.target?.closest?.('.tile-shell')
     const isDDTAnchor = !!shell && shell.dataset.ddt === '1'
 
-    // 2) Infra tiles (roads/YBR) from canvas grid
     let isDDTInfra = false
     const xy = tileXYFromPointerEvent(e)
     if (xy) {
@@ -1397,17 +1402,11 @@ function uninstallDDTDragGating() {
   ddtPointerUpHandler = null
 }
 
-function emitPresenceJoin(x, y, ox = 0.5, oy = 0.5) {
-  if (!socket) return
-  socket.emit('presence:join', { x, y, ox, oy })
-}
-
-function emitPresenceMove(x, y, ox = 0.5, oy = 0.5) {
-  if (!socket) return
-  socket.emit('presence:move', { x, y, ox, oy })
-}
-
 /* ===== realtime presence ===== */
+
+function syncPresenceCount() {
+  presenceCount.value = presenceMarkers.size
+}
 
 function ensurePresencePane() {
   if (!map) return null
@@ -1427,28 +1426,23 @@ function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
   if (!map) return
   if (!id) return
   if (!Number.isFinite(x) || !Number.isFinite(y)) return
-  if (id === ownSocketId) return
 
   ensurePresencePane()
 
   const ll = markerLatLngForTile(x, y, ox, oy)
   let marker = presenceMarkers.get(id)
+  const isSelf = id === ownSocketId
+  const style = isSelf ? PRESENCE_STYLE_SELF : PRESENCE_STYLE_OTHER
 
   if (!marker) {
-    marker = L.circleMarker(ll, {
-      pane: PRESENCE_PANE,
-      radius: PRESENCE_RADIUS,
-      stroke: true,
-      weight: 1,
-      opacity: 0.9,
-      fillOpacity: 0.8,
-    }).addTo(map)
-
+    marker = L.circleMarker(ll, style).addTo(map)
     presenceMarkers.set(id, marker)
+    syncPresenceCount()
     return
   }
 
   marker.setLatLng(ll)
+  marker.setStyle(style)
 }
 
 function removePresenceMarker(id) {
@@ -1456,6 +1450,7 @@ function removePresenceMarker(id) {
   if (!marker) return
   map?.removeLayer(marker)
   presenceMarkers.delete(id)
+  syncPresenceCount()
 }
 
 function clearPresenceMarkers() {
@@ -1463,6 +1458,23 @@ function clearPresenceMarkers() {
     map?.removeLayer(marker)
   }
   presenceMarkers.clear()
+  syncPresenceCount()
+}
+
+function reconcilePresenceSnapshot(users = []) {
+  const keep = new Set()
+
+  for (const user of users) {
+    if (!user?.id) continue
+    keep.add(user.id)
+    upsertPresenceMarker(user)
+  }
+
+  for (const [id] of Array.from(presenceMarkers.entries())) {
+    if (!keep.has(id)) {
+      removePresenceMarker(id)
+    }
+  }
 }
 
 function currentRouteTile() {
@@ -1479,16 +1491,53 @@ function currentRouteTile() {
   }
 }
 
+function regionKeyForTile(x, y) {
+  const size = 64
+  return `${Math.floor(x / size)}:${Math.floor(y / size)}`
+}
+
+function refreshPresenceForViewportCenter() {
+  if (!map || !socket) return
+
+  const center = latLngToTileXY(map.getCenter())
+  const region = regionKeyForTile(center.x, center.y)
+
+  if (region === lastViewportRegion) return
+  lastViewportRegion = region
+
+  socket.emit('presence:watch', {
+    x: center.x,
+    y: center.y,
+  })
+}
+
+function setSelfPresence(x, y, ox = 0.5, oy = 0.5) {
+  selfPresence.x = x
+  selfPresence.y = y
+  selfPresence.ox = ox
+  selfPresence.oy = oy
+
+  if (ownSocketId) {
+    upsertPresenceMarker({ id: ownSocketId, x, y, ox, oy })
+  }
+}
+
+function emitPresenceJoin(x, y, ox = 0.5, oy = 0.5) {
+  if (!socket) return
+  setSelfPresence(x, y, ox, oy)
+  socket.emit('presence:join', { x, y, ox, oy })
+}
+
+function emitPresenceMove(x, y, ox = 0.5, oy = 0.5) {
+  if (!socket) return
+  setSelfPresence(x, y, ox, oy)
+  socket.emit('presence:move', { x, y, ox, oy })
+}
+
 function emitPresenceJoinForCurrentRoute(ox = 0.5, oy = 0.5) {
   const t = currentRouteTile()
   if (!t) return
   emitPresenceJoin(t.x, t.y, ox, oy)
-}
-
-function emitPresenceMoveForCurrentRoute(ox = 0.5, oy = 0.5) {
-  const t = currentRouteTile()
-  if (!t) return
-  emitPresenceMove(t.x, t.y, ox, oy)
 }
 
 function initRealtime() {
@@ -1501,20 +1550,34 @@ function initRealtime() {
 
   socket.on('connect', () => {
     ownSocketId = socket.id || null
+    lastViewportRegion = null
     emitPresenceJoinForCurrentRoute()
+    refreshPresenceForViewportCenter()
   })
 
   socket.on('disconnect', () => {
     ownSocketId = null
+    lastViewportRegion = null
     clearPresenceMarkers()
   })
 
   socket.on('presence:snapshot', (payload) => {
     const users = Array.isArray(payload?.users) ? payload.users : []
-    clearPresenceMarkers()
-    for (const user of users) {
-      upsertPresenceMarker(user)
+
+    if (ownSocketId && Number.isFinite(selfPresence.x) && Number.isFinite(selfPresence.y)) {
+      const hasSelf = users.some((u) => u?.id === ownSocketId)
+      if (!hasSelf) {
+        users.push({
+          id: ownSocketId,
+          x: selfPresence.x,
+          y: selfPresence.y,
+          ox: selfPresence.ox,
+          oy: selfPresence.oy,
+        })
+      }
     }
+
+    reconcilePresenceSnapshot(users)
   })
 
   socket.on('presence:update', (payload) => {
@@ -1537,6 +1600,7 @@ function destroyRealtime() {
   socket.disconnect()
   socket = null
   ownSocketId = null
+  lastViewportRegion = null
   clearPresenceMarkers()
 }
 
@@ -1588,7 +1652,6 @@ onMounted(async () => {
     markerZoomAnimation: false,
   })
 
-  // ✅ install clean drag gating (DDT only)
   installDDTDragGating()
 
   map.setMaxBounds(bounds)
@@ -1632,10 +1695,11 @@ onMounted(async () => {
       await refreshInfraMoveEnd()
       await refreshActiveCellIfNeeded()
     } finally {
-      isMoving = false
-      scheduleFrame()
-    }
-  })
+        isMoving = false
+        refreshPresenceForViewportCenter()
+        scheduleFrame()
+      }
+    })
 
   map.on('click', (e) => {
     if (didMoveSinceDown) return
@@ -1643,15 +1707,11 @@ onMounted(async () => {
     const target = e.originalEvent?.target
     if (target && target.closest && target.closest('.tile-shell')) return
 
-    // ✅ If a tile is open, don't close it when clicking empty space.
-    // Optional: just pan to where the user clicked.
     if (flippedKey.value) {
-      // map.panTo(e.latlng, { animate: false })
       return
     }
 
-    // If no tile is open, clicking empty space can navigate.
-const { x, y, ox, oy } = latLngToTileHit(e.latlng)
+    const { x, y, ox, oy } = latLngToTileHit(e.latlng)
 
     emitPresenceMove(x, y, ox, oy)
 
@@ -1674,7 +1734,7 @@ watch(
 watch(
   () => [route.name, route.params.x, route.params.y],
   () => {
-    // no-op for now
+    // no-op for now; movement is driven by actual clicks / connect join
   }
 )
 
@@ -1684,7 +1744,6 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  // abort requests
   try { cellAbort?.abort() } catch (_) {}
   try { viewportAbort?.abort() } catch (_) {}
 
@@ -1696,9 +1755,7 @@ onBeforeUnmount(() => {
 
   ro?.disconnect()
 
-  // ✅ clean DDT gating listeners
   uninstallDDTDragGating()
-
   destroyRealtime()
 
   map?.remove()
