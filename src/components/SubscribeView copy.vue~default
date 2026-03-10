@@ -7,6 +7,15 @@
       </p>
 
       <form v-if="!success" class="subscribe-form" @submit.prevent="subscribe">
+        <label class="field">
+          <span>Name (optional)</span>
+          <input
+            v-model.trim="name"
+            type="text"
+            autocomplete="name"
+            placeholder="Your name"
+          />
+        </label>
 
         <label class="field">
           <span>Email</span>
@@ -23,6 +32,15 @@
           <input v-model="consent" type="checkbox" required />
           <span>I agree to receive email from EWRM.</span>
         </label>
+
+        <input
+          v-model.trim="company"
+          type="text"
+          tabindex="-1"
+          autocomplete="off"
+          aria-hidden="true"
+          class="hp-field"
+        />
 
         <button type="submit" :disabled="loading || !consent">
           {{ loading ? 'Subscribing…' : 'Subscribe' }}
@@ -41,7 +59,9 @@
 <script setup>
 import { ref } from 'vue'
 
+const name = ref('')
 const email = ref('')
+const company = ref('')
 const consent = ref(false)
 const loading = ref(false)
 const success = ref(false)
@@ -65,7 +85,9 @@ async function subscribe() {
         Accept: 'application/json',
       },
       body: JSON.stringify({
+        name: name.value,
         email: email.value,
+        company: company.value,
         consent: consent.value,
         source: 'website',
       }),
@@ -78,7 +100,9 @@ async function subscribe() {
     }
 
     success.value = true
+    name.value = ''
     email.value = ''
+    company.value = ''
     consent.value = false
   } catch (err) {
     error.value = err?.message || 'Something went wrong.'
