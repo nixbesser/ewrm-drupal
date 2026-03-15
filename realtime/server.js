@@ -73,6 +73,10 @@ function removeFromRegion(region, socketId) {
 function upsertInRegion(region, socketId, x, y, ox = 0.5, oy = 0.5) {
   const bucket = ensureRegionState(region);
   bucket.set(socketId, { x, y, ox, oy });
+
+  if (process.env.DEBUG_RT) {
+    console.log("region size", region, bucket.size);
+  }
 }
 
 function snapshotForRegions(regions, excludeSocketId = null) {
@@ -201,7 +205,9 @@ io.on("connection", (socket) => {
       });
     }
 
-    console.log(mode, socket.id, { x, y, ox, oy, region: currentRegion });
+    if (process.env.DEBUG_RT) {
+      console.log(mode, socket.id, { x, y, ox, oy, region: currentRegion });
+    }
   }
 
   socket.on("presence:join", (payload = {}) => {
