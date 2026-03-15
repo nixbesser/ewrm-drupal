@@ -1487,6 +1487,11 @@ function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5, avatarUrl = null }
       keyboard: false,
     }).addTo(map)
 
+    const el = marker.getElement()
+    if (el) {
+      marker._avatarImg = el.querySelector('.presence-avatar__img')
+    }
+
     presenceMarkers.set(id, marker)
     syncPresenceCount()
     return
@@ -1495,6 +1500,8 @@ function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5, avatarUrl = null }
   const prev = marker.getLatLng()
   const moved = !prev || prev.lat !== ll.lat || prev.lng !== ll.lng
 
+  if (!moved) return
+
   marker.setLatLng(ll)
 
   const el = marker.getElement()
@@ -1502,9 +1509,9 @@ function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5, avatarUrl = null }
     el.classList.toggle('is-self', isSelf)
     el.classList.toggle('is-other', !isSelf)
 
-    const img = el.querySelector('.presence-avatar__img')
-    if (img && img.getAttribute('src') !== finalAvatarUrl) {
-      img.setAttribute('src', finalAvatarUrl)
+    const img = marker._avatarImg
+    if (img && img.src !== finalAvatarUrl) {
+      img.src = finalAvatarUrl
     }
 
     if (moved) {

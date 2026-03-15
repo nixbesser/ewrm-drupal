@@ -117,3 +117,8 @@ button:focus-visible {
   50%  { transform: scale(1.18); }
   100% { transform: scale(1); }
 }
+
+.presence-avatar {
+  will-change: transform;
+  transform: translateZ(0);
+}
