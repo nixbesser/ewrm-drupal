@@ -79,8 +79,8 @@ button:focus-visible {
 }
 
 .presence-avatar {
-  width: 20px;
-  height: 20px;
+  width: 32px;
+  height: 32px;
   margin: 0;
   padding: 0;
   background: transparent !important;
@@ -90,29 +90,30 @@ button:focus-visible {
   will-change: transform;
 }
 
-.presence-avatar__dot {
+.presence-avatar__inner {
   width: 100%;
   height: 100%;
-  border-radius: 999px;
-  border: 2px solid #fff;
+  border-radius: 50%;
+  overflow: hidden;
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
-  transform-origin: center center;
+  background: rgba(0, 0, 0, 0.15);
 }
 
-.presence-avatar.is-self .presence-avatar__dot {
-  background: #ff5a36;
+.presence-avatar__img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
-.presence-avatar.is-other .presence-avatar__dot {
-  background: #00b7ff;
-}
-
-.presence-avatar.arrival-pulse .presence-avatar__dot {
+.presence-avatar.arrival-pulse .presence-avatar__inner {
   animation: presence-arrival-pulse 180ms ease-out;
 }
 
 @keyframes presence-arrival-pulse {
   0%   { transform: scale(1); }
-  50%  { transform: scale(1.22); }
+  50%  { transform: scale(1.18); }
   100% { transform: scale(1); }
 }

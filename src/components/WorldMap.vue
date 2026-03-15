@@ -55,6 +55,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { fetchViewport, fetchCell, resolveObject } from '../api/worldApi'
 import TileAnchor from './TileAnchor.vue'
 
+import selfAvatar from '../assets/self-avatar.png'
+import otherAvatar from '../assets/other-avatar.png'
 /**
  * BEST UX SETTINGS
  * - Render on every move via RAF (drag + inertia)
@@ -1446,7 +1448,7 @@ function markerLatLngForTile(x, y, ox = 0.5, oy = 0.5) {
 //   marker.setStyle(style)
 // }
 
-function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
+function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5, avatarUrl = null }) {
   if (!map) return
   if (!id) return
   if (!Number.isFinite(x) || !Number.isFinite(y)) return
@@ -1457,12 +1459,25 @@ function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
   let marker = presenceMarkers.get(id)
   const isSelf = id === ownSocketId
 
+  const fallbackAvatar = isSelf ? selfAvatar : otherAvatar
+
+  const finalAvatarUrl = avatarUrl || fallbackAvatar
+
   if (!marker) {
     const icon = L.divIcon({
       className: `presence-avatar ${isSelf ? 'is-self' : 'is-other'}`,
-      html: `<div class="presence-avatar__dot"></div>`,
-      iconSize: [20, 20],
-      iconAnchor: [10, 10],
+      html: `
+        <div class="presence-avatar__inner">
+          <img
+            class="presence-avatar__img"
+            src="${finalAvatarUrl}"
+            alt=""
+            draggable="false"
+          />
+        </div>
+      `,
+      iconSize: [32, 32],
+      iconAnchor: [16, 16],
     })
 
     marker = L.marker(ll, {
@@ -1486,6 +1501,11 @@ function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
   if (el) {
     el.classList.toggle('is-self', isSelf)
     el.classList.toggle('is-other', !isSelf)
+
+    const img = el.querySelector('.presence-avatar__img')
+    if (img && img.getAttribute('src') !== finalAvatarUrl) {
+      img.setAttribute('src', finalAvatarUrl)
+    }
 
     if (moved) {
       el.classList.remove('arrival-pulse')
