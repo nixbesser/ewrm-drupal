@@ -52,7 +52,8 @@ import L from 'leaflet'
 import { io } from 'socket.io-client'
 import { ref, onMounted, onBeforeUnmount, watch, reactive, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { fetchViewport, fetchCell, resolveObject } from '../api/worldApi'
+
+import { fetchViewport, fetchCell, resolveObject, fetchInfra } from '../api/worldApi'
 import TileAnchor from './TileAnchor.vue'
 
 import selfAvatar from '../assets/self-avatar.png'
@@ -957,30 +958,13 @@ async function refreshInfraForRect_UI(uiRect) {
   const yminBackend = Math.min(by1, by2)
   const ymaxBackend = Math.max(by1, by2)
 
-  const qs = new URLSearchParams({
-    z: String(WORLD.z),
-    xmin: String(uiRect.xmin),
-    xmax: String(uiRect.xmax),
-    ymin: String(yminBackend),
-    ymax: String(ymaxBackend),
+  const data = await fetchInfra({
+    z: WORLD.z,
+    xmin: uiRect.xmin,
+    xmax: uiRect.xmax,
+    ymin: yminBackend,
+    ymax: ymaxBackend,
   })
-
-  const res = await fetch(`/api/world/infra?${qs.toString()}`, {
-    headers: { Accept: 'application/json' },
-  })
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '')
-    throw new Error(`infra HTTP ${res.status}: ${txt.slice(0, 120)}`)
-  }
-
-  const ct = res.headers.get('content-type') || ''
-  if (!ct.includes('application/json')) {
-    const txt = await res.text().catch(() => '')
-    throw new Error(`infra not JSON (ct=${ct}) ${txt.slice(0, 120)}`)
-  }
-
-  const data = await res.json()
 
   for (const t of data) {
     const x = Number(t.x)

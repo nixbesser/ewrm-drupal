@@ -89,3 +89,22 @@ export function fetchEmbed({ url }, options = {}) {
   }
   return getJson(`${BASE}/api/embed?${qs({ url })}`, options);
 }
+
+export function fetchInfra(params, options = {}) {
+  const z = params?.z ?? 10
+
+  if (
+    params?.xmin === undefined ||
+    params?.xmax === undefined ||
+    params?.ymin === undefined ||
+    params?.ymax === undefined
+  ) {
+    throw new Error('fetchInfra: expected {z?, xmin, xmax, ymin, ymax}')
+  }
+
+  const { xmin, xmax, ymin, ymax } = params
+  return getJson(
+    `${BASE}/api/world/infra?${qs({ z, xmin, xmax, ymin, ymax })}`,
+    options
+  )
+}
