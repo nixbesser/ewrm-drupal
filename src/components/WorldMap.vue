@@ -1423,6 +1423,29 @@ function markerLatLngForTile(x, y, ox = 0.5, oy = 0.5) {
   return L.latLng(lat, lng)
 }
 
+// function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
+//   if (!map) return
+//   if (!id) return
+//   if (!Number.isFinite(x) || !Number.isFinite(y)) return
+//
+//   ensurePresencePane()
+//
+//   const ll = markerLatLngForTile(x, y, ox, oy)
+//   let marker = presenceMarkers.get(id)
+//   const isSelf = id === ownSocketId
+//   const style = isSelf ? PRESENCE_STYLE_SELF : PRESENCE_STYLE_OTHER
+//
+//   if (!marker) {
+//     marker = L.circleMarker(ll, style).addTo(map)
+//     presenceMarkers.set(id, marker)
+//     syncPresenceCount()
+//     return
+//   }
+//
+//   marker.setLatLng(ll)
+//   marker.setStyle(style)
+// }
+
 function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
   if (!map) return
   if (!id) return
@@ -1433,17 +1456,43 @@ function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
   const ll = markerLatLngForTile(x, y, ox, oy)
   let marker = presenceMarkers.get(id)
   const isSelf = id === ownSocketId
-  const style = isSelf ? PRESENCE_STYLE_SELF : PRESENCE_STYLE_OTHER
 
   if (!marker) {
-    marker = L.circleMarker(ll, style).addTo(map)
+    const icon = L.divIcon({
+      className: `presence-avatar ${isSelf ? 'is-self' : 'is-other'}`,
+      html: `<div class="presence-avatar__dot"></div>`,
+      iconSize: [20, 20],
+      iconAnchor: [10, 10],
+    })
+
+    marker = L.marker(ll, {
+      icon,
+      pane: PRESENCE_PANE,
+      interactive: false,
+      keyboard: false,
+    }).addTo(map)
+
     presenceMarkers.set(id, marker)
     syncPresenceCount()
     return
   }
 
+  const prev = marker.getLatLng()
+  const moved = !prev || prev.lat !== ll.lat || prev.lng !== ll.lng
+
   marker.setLatLng(ll)
-  marker.setStyle(style)
+
+  const el = marker.getElement()
+  if (el) {
+    el.classList.toggle('is-self', isSelf)
+    el.classList.toggle('is-other', !isSelf)
+
+    if (moved) {
+      el.classList.remove('arrival-pulse')
+      void el.offsetWidth
+      el.classList.add('arrival-pulse')
+    }
+  }
 }
 
 function removePresenceMarker(id) {
