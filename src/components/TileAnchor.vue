@@ -1,176 +1,192 @@
 <template>
-  <!-- NOTE: click handling stays in WorldMap.vue; this component is presentational -->
-  <div class="flip" :class="{ flipped }" :aria-label="ariaLabel">
-    <div class="flip__inner">
-      <!-- FRONT (cover) -->
-      <section class="face front" :style="frontStyle">
-        <div v-if="!tile.cover" class="fallback">
-          <div class="fallback__label">{{ tile.x }},{{ tile.y }}</div>
-        </div>
-      </section>
-
-      <!-- BACK -->
-      <section class="face back" @click.stop>
-        <!-- ✅ tile-ui wrapper: used by WorldMap to prevent map-drag when interacting with UI -->
-        <div class="tile-ui back__chrome">
-          <div class="back__title">{{ backTitle }}</div>
-
-          <!-- TABS (dynamic) -->
-          <nav class="tabs tile-tabs" aria-label="Tile tabs">
-            <button
-              v-for="tdef in tabDefs"
-              :key="tdef.id"
-              class="tab"
-              :class="{ active: activeTab === tdef.id }"
-              :disabled="isTabDisabled(tdef.id)"
-              type="button"
-              @click.stop="onTabClick(tdef.id)"
-            >
-              {{ tdef.label }}
-            </button>
-          </nav>
-
-          <!-- PANELS -->
-          <div class="panel tile-panel">
-            <!-- EMBED -->
-            <div v-show="activeTab === 'embed'" class="panel__body">
-              <div v-if="!embedUrl" class="back__hint">No embed_url yet.</div>
-
-              <div v-else>
-                <div v-if="embedState.status === 'idle'" class="back__hint">
-                  Flip to load embed.
-                </div>
-
-                <div v-else-if="embedState.status === 'loading'" class="back__loading">
-                  Loading embed…
-                </div>
-
-                <div v-else-if="embedState.status === 'error'" class="back__error">
-                  <div><strong>Embed error</strong></div>
-                  <div class="back__errorMsg">{{ embedState.error }}</div>
-                  <button class="back__btn" type="button" @click.stop="reloadEmbed">
-                    Retry
-                  </button>
-                </div>
-
-                <div
-                  v-else-if="embedState.status === 'ready' && embedState.embed?.iframe_src"
-                  class="embed"
-                >
-                  <iframe
-                    class="embed__frame"
-                    :src="embedState.embed.iframe_src"
-                    :style="{ height: iframeHeight + 'px' }"
-                    allowfullscreen
-                    loading="lazy"
-                    referrerpolicy="strict-origin-when-cross-origin"
-                  ></iframe>
-
-                  <div
-                    class="embed__meta"
-                    v-if="embedState.embed?.meta?.title || embedState.embed?.meta?.site"
-                  >
-                    <div class="embed__title">{{ embedState.embed?.meta?.title }}</div>
-                    <div class="embed__site">{{ embedState.embed?.meta?.site }}</div>
-                  </div>
-                </div>
-
-                <div v-else class="back__hint">No iframe returned.</div>
-              </div>
-            </div>
-
-            <!-- DESCRIPTION -->
-            <div v-show="activeTab === 'description'" class="panel__body">
-              <div v-if="descriptionText" class="prose tile-body">{{ descriptionText }}</div>
-              <div v-else class="back__hint">No description yet.</div>
-            </div>
-
-            <!-- LINKS -->
-            <div v-show="activeTab === 'links'" class="panel__body">
-              <div v-if="links.length" class="links">
-                <a
-                  v-for="l in links"
-                  :key="l.url"
-                  class="link"
-                  :href="l.url"
-                  :target="isExternal(l.url) ? '_blank' : null"
-                  :rel="isExternal(l.url) ? 'noopener' : null"
-                  @click.stop
-                >
-                  <span class="link__label">{{ l.label || hostLabel(l.url) }}</span>
-                  <span class="link__url">{{ prettyUrl(l.url) }}</span>
-                </a>
-              </div>
-              <div v-else class="back__hint">No links yet.</div>
-            </div>
-
-            <!-- COVER -->
-            <div v-show="activeTab === 'cover'" class="panel__body">
-              <button class="coverBtn" type="button" @click.stop="onCoverTab()">
-                Flip to cover
-              </button>
-
-              <div class="back__meta" style="margin-top: 10px;">
-                <div><strong>tile:</strong> {{ tile.x }},{{ tile.y }} ({{ tile.w }}×{{ tile.h }})</div>
-                <div v-if="obj?.bundle && obj?.slug">
-                  <strong>object:</strong> {{ obj.bundle }} · {{ obj.slug }}
-                </div>
-                <div v-else>
-                  <strong>object:</strong> none
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="back__footer">
-            EWRM · Song tile
-          </div>
-        </div>
-      </section>
+  <!-- CLOSED: lightweight, stable cover only -->
+  <div v-if="!flipped" class="tile-front-only" :aria-label="ariaLabel">
+    <img
+      v-if="tile.cover"
+      class="cover"
+      :src="tile.cover"
+      alt=""
+      draggable="false"
+      loading="eager"
+      decoding="sync"
+    />
+    <div v-else class="fallback">
+      <div class="fallback__label">{{ tile.x }},{{ tile.y }}</div>
     </div>
   </div>
+
+  <!-- OPEN: back UI only -->
+  <section v-else class="tile-back-only" :aria-label="ariaLabel" @click.stop>
+    <div class="tile-ui back__chrome">
+      <div class="back__title">{{ backTitle }}</div>
+
+      <nav class="tabs tile-tabs" aria-label="Tile tabs">
+        <button
+          v-for="tdef in tabDefs"
+          :key="tdef.id"
+          class="tab"
+          :class="{ active: activeTab === tdef.id }"
+          :disabled="isTabDisabled(tdef.id)"
+          type="button"
+          @click.stop="onTabClick(tdef.id)"
+        >
+          {{ tdef.label }}
+        </button>
+      </nav>
+
+      <div class="panel tile-panel">
+        <!-- EMBED -->
+        <div v-show="activeTab === 'embed'" class="panel__body">
+          <div v-if="!embedUrl" class="back__hint">No embed_url yet.</div>
+
+          <div v-else>
+            <div v-if="embedState.status === 'idle'" class="back__hint">
+              Flip to load embed.
+            </div>
+
+            <div v-else-if="embedState.status === 'loading'" class="back__loading">
+              Loading embed…
+            </div>
+
+            <div v-else-if="embedState.status === 'error'" class="back__error">
+              <div><strong>Embed error</strong></div>
+              <div class="back__errorMsg">{{ embedState.error }}</div>
+              <button class="back__btn" type="button" @click.stop="reloadEmbed">
+                Retry
+              </button>
+            </div>
+
+            <div
+              v-else-if="embedState.status === 'ready' && embedState.embed?.iframe_src"
+              class="embed"
+            >
+              <iframe
+                class="embed__frame"
+                :src="embedState.embed.iframe_src"
+                :style="{ height: iframeHeight + 'px' }"
+                allowfullscreen
+                loading="lazy"
+                referrerpolicy="strict-origin-when-cross-origin"
+              ></iframe>
+
+              <div
+                class="embed__meta"
+                v-if="embedState.embed?.meta?.title || embedState.embed?.meta?.site"
+              >
+                <div class="embed__title">{{ embedState.embed?.meta?.title }}</div>
+                <div class="embed__site">{{ embedState.embed?.meta?.site }}</div>
+              </div>
+            </div>
+
+            <div v-else class="back__hint">No iframe returned.</div>
+          </div>
+        </div>
+
+        <!-- DESCRIPTION -->
+        <div v-show="activeTab === 'description'" class="panel__body">
+          <div v-if="descriptionText" class="prose tile-body">{{ descriptionText }}</div>
+          <div v-else class="back__hint">No description yet.</div>
+        </div>
+
+        <!-- LINKS -->
+        <div v-show="activeTab === 'links'" class="panel__body">
+          <div v-if="links.length" class="links">
+            <a
+              v-for="l in links"
+              :key="l.url"
+              class="link"
+              :href="l.url"
+              :target="isExternal(l.url) ? '_blank' : null"
+              :rel="isExternal(l.url) ? 'noopener' : null"
+              @click.stop
+            >
+              <span class="link__label">{{ l.label || hostLabel(l.url) }}</span>
+              <span class="link__url">{{ prettyUrl(l.url) }}</span>
+            </a>
+          </div>
+          <div v-else class="back__hint">No links yet.</div>
+        </div>
+
+        <!-- COVER -->
+        <div v-show="activeTab === 'cover'" class="panel__body">
+          <button class="coverBtn" type="button" @click.stop="onCoverTab()">
+            Return to cover
+          </button>
+
+          <div class="back__meta" style="margin-top: 10px;">
+            <div><strong>tile:</strong> {{ tile.x }},{{ tile.y }} ({{ tile.w }}×{{ tile.h }})</div>
+            <div v-if="obj?.bundle && obj?.slug">
+              <strong>object:</strong> {{ obj.bundle }} · {{ obj.slug }}
+            </div>
+            <div v-else>
+              <strong>object:</strong> none
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="back__footer">
+        EWRM · Song tile
+      </div>
+    </div>
+  </section>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, reactive, watch, ref } from 'vue'
 import { fetchEmbed } from '../api/worldApi'
 
+const COVER_READY =
+  globalThis.__EWRM_COVER_READY__ || (globalThis.__EWRM_COVER_READY__ = new Set())
+
+const COVER_PROMISES =
+  globalThis.__EWRM_COVER_PROMISES__ || (globalThis.__EWRM_COVER_PROMISES__ = new Map())
+
+function preloadCover(url) {
+  if (!url) return Promise.resolve()
+  if (COVER_READY.has(url)) return Promise.resolve()
+  if (COVER_PROMISES.has(url)) return COVER_PROMISES.get(url)
+
+  const p = new Promise((resolve) => {
+    const img = new Image()
+    img.decoding = 'sync'
+    img.onload = async () => {
+      try { await img.decode?.() } catch (_) {}
+      COVER_READY.add(url)
+      COVER_PROMISES.delete(url)
+      resolve()
+    }
+    img.onerror = () => {
+      COVER_PROMISES.delete(url)
+      resolve()
+    }
+    img.src = url
+  })
+
+  COVER_PROMISES.set(url, p)
+  return p
+}
+
 const props = defineProps({
   tile: { type: Object, required: true },
   flipped: { type: Boolean, default: false },
-  // full cell payload (only provided for active tile)
   cell: { type: Object, default: null },
-
-  // ✅ controlled tab from parent (WorldMap) for persistence
-  tab: { type: String, default: '' }, // 'cover'|'embed'|'description'|'links' (or '')
-
-  // ✅ dynamic tabs from parent (bundle-driven)
-  // [{ id: 'embed', label: 'Media' }, ...]
+  tab: { type: String, default: '' },
   tabs: { type: Array, default: () => [] },
 })
 
-const emit = defineEmits([
-  'request-cover',
-  // ✅ emit to parent for persistence
-  'tab-change',
-])
+const emit = defineEmits(['request-cover', 'tab-change'])
 
-/**
- * Shared cache across all TileAnchor instances (module scope).
- * url -> embed payload
- */
 const EMBED_CACHE =
   globalThis.__EWRM_EMBED_CACHE__ || (globalThis.__EWRM_EMBED_CACHE__ = new Map())
 
 const embedState = reactive({
-  status: 'idle', // 'idle' | 'loading' | 'ready' | 'error'
+  status: 'idle',
   embed: null,
   error: null,
 })
 
 let aborter = null
-
-// ✅ local active tab, but kept in sync with parent prop
 const activeTab = ref('embed')
 
 const ariaLabel = computed(() => {
@@ -179,10 +195,6 @@ const ariaLabel = computed(() => {
   return `Tile ${props.tile?.x},${props.tile?.y} (${w}×${h})`
 })
 
-/**
- * Prefer active cell object (full payload) when available.
- * Fall back to tile.object (preview payload from viewport).
- */
 const obj = computed(() => props.cell?.object || props.tile?.object || null)
 
 const backTitle = computed(() => {
@@ -192,18 +204,6 @@ const backTitle = computed(() => {
   return 'Tile details'
 })
 
-/**
- * Cover is stored on TILE (not object).
- */
-const frontStyle = computed(() => {
-  const url = props.tile?.cover
-  if (!url) return {}
-  return { backgroundImage: `url("${url}")` }
-})
-
-/**
- * embed_url + embed_start (seconds)
- */
 const embedUrl = computed(() => {
   const u = obj.value?.embed_url
   return typeof u === 'string' && u.startsWith('http') ? u : null
@@ -239,9 +239,6 @@ const iframeHeight = computed(() => {
   return 360
 })
 
-/**
- * Tabs: if parent provides a set, use it. Otherwise fallback to a safe default.
- */
 const tabDefs = computed(() => {
   return props.tabs && props.tabs.length
     ? props.tabs
@@ -288,7 +285,6 @@ async function loadEmbed(rawUrl) {
 
   const url = withStart(rawUrl, embedStart.value)
 
-  // Cache hit
   if (EMBED_CACHE.has(url)) {
     embedState.status = 'ready'
     embedState.embed = EMBED_CACHE.get(url)
@@ -340,9 +336,12 @@ function firstContentTab() {
   return 'cover'
 }
 
-function onCoverTab() {
-  // Cover is an action, not a persisted tab.
-  // Reset local tab so reopening lands on a real content tab.
+async function onCoverTab() {
+  const url = props.tile?.cover || null
+  if (url) {
+    await preloadCover(url)
+  }
+
   activeTab.value = firstContentTab()
   emit('request-cover')
 }
@@ -352,9 +351,14 @@ function onTabClick(id) {
   else setTab(id)
 }
 
-/**
- * Sync activeTab from parent (persistent tab memory).
- */
+watch(
+  () => props.tile?.cover,
+  (url) => {
+    if (url) preloadCover(url)
+  },
+  { immediate: true }
+)
+
 watch(
   () => props.tab,
   (t) => {
@@ -365,73 +369,59 @@ watch(
   { immediate: true }
 )
 
-/**
- * If tabs set changes and the current activeTab is no longer present,
- * fall back to the first available enabled tab.
- */
 watch(
   () => tabDefs.value,
   () => {
     const ids = new Set(tabDefs.value.map((d) => d.id))
     if (!ids.has(activeTab.value)) {
       const first = tabDefs.value.find((d) => !isTabDisabled(d.id)) || tabDefs.value[0]
-      if (first?.id) setTab(first.id === 'cover' ? 'embed' : first.id) // don't auto-flip to cover
+      if (first?.id) setTab(first.id === 'cover' ? 'embed' : first.id)
     }
   },
   { immediate: true }
 )
 
-/**
- * Lazy embed loading rules:
- * - only when tile is flipped AND active tab is 'embed' AND embedUrl exists
- * - abort and reset when unflipped or embedUrl disappears
- */
 watch(
-   () => [props.flipped, activeTab.value, embedUrl.value, embedStart.value, obj.value?.id],
-   ([isFlipped, tab, url]) => {
-     if (!url) {
-       abortInFlight()
-       resetStateToIdle()
+  () => [props.flipped, activeTab.value, embedUrl.value, embedStart.value, obj.value?.id],
+  ([isFlipped, tab, url]) => {
+    if (!url) {
+      abortInFlight()
+      resetStateToIdle()
 
-       if (!props.tab) {
-         if (descriptionText.value) activeTab.value = 'description'
-         else if (links.value.length) activeTab.value = 'links'
-         else activeTab.value = 'cover'
-       }
-       return
-     }
+      if (!props.tab) {
+        if (descriptionText.value) activeTab.value = 'description'
+        else if (links.value.length) activeTab.value = 'links'
+        else activeTab.value = 'cover'
+      }
+      return
+    }
 
-     if (isFlipped) {
-       if (tab === 'embed' && embedState.status === 'idle') {
-         loadEmbed(url)
-       }
-     } else {
-       abortInFlight()
-       resetStateToIdle()
-     }
-   },
-   { immediate: true }
- )
+    if (isFlipped) {
+      if (tab === 'embed' && embedState.status === 'idle') {
+        loadEmbed(url)
+      }
+    } else {
+      abortInFlight()
+      resetStateToIdle()
+    }
+  },
+  { immediate: true }
+)
 
 watch(
-   () => props.flipped,
-   (isFlipped) => {
-     if (!isFlipped) return
-
-     // Only initialize if parent hasn't chosen a tab
-     if (!props.tab) {
-       activeTab.value = firstContentTab()
-     }
-   }
- )
+  () => props.flipped,
+  (isFlipped) => {
+    if (!isFlipped) return
+    if (!props.tab) {
+      activeTab.value = firstContentTab()
+    }
+  }
+)
 
 onBeforeUnmount(() => {
   abortInFlight()
 })
 
-/**
- * Link helpers
- */
 function isExternal(u) {
   return typeof u === 'string' && /^https?:\/\//i.test(u)
 }
@@ -453,48 +443,37 @@ function hostLabel(u) {
 </script>
 
 <style scoped>
-/* Outer: provides perspective and clipping */
-.flip {
+.tile-front-only,
+.tile-back-only {
   width: 100%;
   height: 100%;
-  border-radius: 0;
   overflow: hidden;
-  perspective: 900px;
-  transform: translateZ(0);
 }
 
-/* Inner: rotates */
-.flip__inner {
-  position: relative;
+.tile-front-only {
   width: 100%;
   height: 100%;
-  transform-style: preserve-3d;
-  transition: transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
-  will-change: transform;
-}
+  overflow: hidden;
 
-.flip.flipped .flip__inner {
-  transform: rotateY(180deg);
-}
-
-/* Faces */
-.face {
-  position: absolute;
-  inset: 0;
-  backface-visibility: hidden;
-  -webkit-backface-visibility: hidden;
   transform: translateZ(0);
 }
 
-/* FRONT */
-.front {
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
-  background-color: rgba(0, 0, 0, 0.04);
+.tile-front-only {
+  background: rgba(0, 0, 0, 0.04);
 }
 
-/* fallback if no cover */
+.cover {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+
+  transform: translateZ(0);
+  will-change: transform;
+
+  backface-visibility: hidden;
+}
+
 .fallback {
   width: 100%;
   height: 100%;
@@ -518,9 +497,7 @@ function hostLabel(u) {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
 }
 
-/* BACK */
-.back {
-  transform: rotateY(180deg);
+.tile-back-only {
   background: #fff;
   color: #111;
 }
@@ -569,7 +546,7 @@ function hostLabel(u) {
 .panel {
   flex: 1;
   min-height: 0;
-  overflow: auto; /* critical: scroll inside tile, not the map */
+  overflow: auto;
   border-radius: 12px;
 }
 
@@ -577,7 +554,6 @@ function hostLabel(u) {
   min-height: 100%;
 }
 
-/* Embed visuals reused */
 .back__hint {
   font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   color: rgba(0, 0, 0, 0.55);
