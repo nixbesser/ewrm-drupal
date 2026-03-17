@@ -58,6 +58,7 @@ import TileAnchor from './TileAnchor.vue'
 
 import selfAvatar from '../assets/self-avatar.png'
 import otherAvatar from '../assets/other-avatar.png'
+
 /**
  * BEST UX SETTINGS
  * - Render on every move via RAF (drag + inertia)
@@ -68,8 +69,8 @@ const BACKEND_Y_IS_BOTTOM_ORIGIN = false
 
 // Fetch radii (pads):
 const PAD_ANCHORS = 12
-const PAD_INFRA_MOVE = 16   // prefetch while moving
-const PAD_INFRA_END = 24    // bigger prefetch on moveend
+const PAD_INFRA_MOVE = 16
+const PAD_INFRA_END = 24
 const PAD_DRAW = 2
 
 // Move fetch throttle (ms)
@@ -112,7 +113,7 @@ const PRESENCE_STYLE_OTHER = {
 let socket = null
 let ownSocketId = null
 let lastViewportRegions = []
-const presenceMarkers = new Map() // socketId -> L.circleMarker
+const presenceMarkers = new Map()
 const presenceCount = ref(0)
 
 const selfPresence = reactive({
@@ -127,6 +128,44 @@ const gridCanvasEl = ref(null)
 const anchorLayerEl = ref(null)
 
 const anchors = ref([])
+
+const preloadedCovers = new Set()
+const coverPreloadQueue = new Map()
+
+function preloadCover(url) {
+  if (!url) return Promise.resolve()
+  if (preloadedCovers.has(url)) return Promise.resolve()
+  if (coverPreloadQueue.has(url)) return coverPreloadQueue.get(url)
+
+  const p = new Promise((resolve) => {
+    const img = new Image()
+    img.decoding = 'async'
+    img.loading = 'eager'
+
+    img.onload = async () => {
+      try { await img.decode?.() } catch (_) {}
+      preloadedCovers.add(url)
+      coverPreloadQueue.delete(url)
+      resolve()
+    }
+
+    img.onerror = () => {
+      coverPreloadQueue.delete(url)
+      resolve()
+    }
+
+    img.src = url
+  })
+
+  coverPreloadQueue.set(url, p)
+  return p
+}
+
+function preloadAnchorCovers(list) {
+  for (const a of list || []) {
+    if (a?.cover) preloadCover(a.cover)
+  }
+}
 
 // Anchor cache: key "x:y" (UI coords) -> anchor object {.., lastSeenMs}
 const anchorCache = new Map()
@@ -670,6 +709,12 @@ function cellPxInLayer() {
   return Math.abs(p1.x - p0.x) || WORLD.cellPx
 }
 
+let _cellPxLayer = WORLD.cellPx
+
+function updateCellPxLayer() {
+  _cellPxLayer = cellPxInLayer()
+}
+
 const camL = {
   xmin: 0,
   ymin: 0,
@@ -689,7 +734,7 @@ function updateAnchorCameraLayer() {
   camL.px0 = p0.x
   camL.py0 = p0.y
 
-  camL.cell = cellPxInLayer()
+  camL.cell = _cellPxLayer
 }
 
 /* ===== infra visuals ===== */
@@ -808,7 +853,7 @@ function tileStyle(t) {
   const inPane = anchorsAreInLeafletPane()
 
   if (inPane) {
-    const cell = camL.cell
+    const cell = _cellPxLayer
     const px = camL.px0 + (t.x - camL.xmin) * cell
     const py = camL.py0 + (t.y - camL.ymin) * cell
 
@@ -913,6 +958,7 @@ async function refreshViewport() {
     }
 
     anchors.value = list
+    preloadAnchorCovers(list)
     anchorCacheSize.value = anchorCache.size
 
     anchorPruneCounter++
@@ -1069,6 +1115,8 @@ async function refreshActiveCellIfNeeded() {
         flippable: (data.flippable !== undefined) ? !!data.flippable : undefined,
         lastSeenMs: Date.now(),
       }
+
+      if (fullAnchor.cover) preloadCover(fullAnchor.cover)
 
       pinnedAnchor.value = fullAnchor
 
@@ -1277,6 +1325,7 @@ function scheduleFrame() {
   if (raf) return
   raf = requestAnimationFrame(() => {
     raf = 0
+    updateCellPxLayer()
     updateAnchorCameraLayer()
     drawGrid()
     updateHud()
@@ -1409,29 +1458,6 @@ function markerLatLngForTile(x, y, ox = 0.5, oy = 0.5) {
   return L.latLng(lat, lng)
 }
 
-// function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
-//   if (!map) return
-//   if (!id) return
-//   if (!Number.isFinite(x) || !Number.isFinite(y)) return
-//
-//   ensurePresencePane()
-//
-//   const ll = markerLatLngForTile(x, y, ox, oy)
-//   let marker = presenceMarkers.get(id)
-//   const isSelf = id === ownSocketId
-//   const style = isSelf ? PRESENCE_STYLE_SELF : PRESENCE_STYLE_OTHER
-//
-//   if (!marker) {
-//     marker = L.circleMarker(ll, style).addTo(map)
-//     presenceMarkers.set(id, marker)
-//     syncPresenceCount()
-//     return
-//   }
-//
-//   marker.setLatLng(ll)
-//   marker.setStyle(style)
-// }
-
 function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5, avatarUrl = null }) {
   if (!map) return
   if (!id) return
@@ -1444,7 +1470,6 @@ function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5, avatarUrl = null }
   const isSelf = id === ownSocketId
 
   const fallbackAvatar = isSelf ? selfAvatar : otherAvatar
-
   const finalAvatarUrl = avatarUrl || fallbackAvatar
 
   if (!marker) {
@@ -1762,6 +1787,7 @@ onMounted(async () => {
   resizeCanvas()
   ro = new ResizeObserver(() => {
     resizeCanvas()
+    updateCellPxLayer()
     updateAnchorCameraLayer()
     drawGrid()
     updateHud()
@@ -1821,6 +1847,7 @@ onMounted(async () => {
 
   requestAnimationFrame(() => {
     map.invalidateSize({ pan: false })
+    updateCellPxLayer()
     scheduleFrame()
     handleRoutePipeline().catch(console.error)
   })
@@ -1896,8 +1923,8 @@ onBeforeUnmount(() => {
 }
 
 .tile-shell.is-active {
-  outline: 4px solid rgba(0, 0, 0, 0.6);
-  outline-offset: -4px;
+  /* outline: 4px solid rgba(0, 0, 0, 0.6);
+  outline-offset: -4px; */
   z-index: 5;
 }
 
