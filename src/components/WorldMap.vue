@@ -129,22 +129,38 @@ const anchorLayerEl = ref(null)
 
 const anchors = ref([])
 
-const preloadedCovers = new Set()
+const MAX_PRELOADED_COVERS = 400
+const preloadedCovers = new Map()
 const coverPreloadQueue = new Map()
 
 function preloadCover(url) {
   if (!url) return Promise.resolve()
-  if (preloadedCovers.has(url)) return Promise.resolve()
-  if (coverPreloadQueue.has(url)) return coverPreloadQueue.get(url)
+
+  if (preloadedCovers.has(url)) {
+    const v = preloadedCovers.get(url)
+    preloadedCovers.delete(url)
+    preloadedCovers.set(url, v)
+    return Promise.resolve()
+  }
+
+  if (coverPreloadQueue.has(url)) {
+    return coverPreloadQueue.get(url)
+  }
 
   const p = new Promise((resolve) => {
     const img = new Image()
     img.decoding = 'async'
-    img.loading = 'eager'
 
     img.onload = async () => {
       try { await img.decode?.() } catch (_) {}
-      preloadedCovers.add(url)
+
+      preloadedCovers.set(url, true)
+
+      if (preloadedCovers.size > MAX_PRELOADED_COVERS) {
+        const oldest = preloadedCovers.keys().next().value
+        if (oldest) preloadedCovers.delete(oldest)
+      }
+
       coverPreloadQueue.delete(url)
       resolve()
     }
