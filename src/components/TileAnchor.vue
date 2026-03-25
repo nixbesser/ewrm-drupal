@@ -1,5 +1,4 @@
 <template>
-  <!-- CLOSED: lightweight, stable cover only -->
   <div v-if="!flipped" class="tile-front-only" :aria-label="ariaLabel">
     <img
       v-if="tile.cover"
@@ -15,7 +14,6 @@
     </div>
   </div>
 
-  <!-- OPEN: back UI only -->
   <section v-else class="tile-back-only" :aria-label="ariaLabel" @click.stop>
     <div class="tile-ui back__chrome">
       <div class="back__title">{{ backTitle }}</div>
@@ -36,7 +34,7 @@
 
       <div class="panel tile-panel">
         <!-- EMBED -->
-        <div v-show="activeTab === 'embed'" class="panel__body">
+        <div v-if="hasTab('embed')" v-show="activeTab === 'embed'" class="panel__body">
           <div v-if="!embedUrl" class="back__hint">No embed_url yet.</div>
 
           <div v-else>
@@ -83,13 +81,13 @@
         </div>
 
         <!-- DESCRIPTION -->
-        <div v-show="activeTab === 'description'" class="panel__body">
+        <div v-if="hasTab('description')" v-show="activeTab === 'description'" class="panel__body">
           <div v-if="descriptionText" class="prose tile-body">{{ descriptionText }}</div>
           <div v-else class="back__hint">No description yet.</div>
         </div>
 
         <!-- LINKS -->
-        <div v-show="activeTab === 'links'" class="panel__body">
+        <div v-if="hasTab('links')" v-show="activeTab === 'links'" class="panel__body">
           <div v-if="links.length" class="links">
             <a
               v-for="l in links"
@@ -108,7 +106,7 @@
         </div>
 
         <!-- COVER -->
-        <div v-show="activeTab === 'cover'" class="panel__body">
+        <div v-if="hasTab('cover')" v-show="activeTab === 'cover'" class="panel__body">
           <button class="coverBtn" type="button" @click.stop="onCoverTab()">
             Return to cover
           </button>
@@ -126,7 +124,7 @@
       </div>
 
       <div class="back__footer">
-        EWRM · Song tile
+        EWRM · Tile · FORCE 1
       </div>
     </div>
   </section>
@@ -187,7 +185,7 @@ const embedState = reactive({
 })
 
 let aborter = null
-const activeTab = ref('embed')
+const activeTab = ref('cover')
 
 const ariaLabel = computed(() => {
   const w = props.tile?.w ?? 1
@@ -250,11 +248,35 @@ const tabDefs = computed(() => {
       ]
 })
 
+function hasTab(id) {
+  return tabDefs.value.some(tab => tab.id === id)
+}
+
 function isTabDisabled(id) {
   if (id === 'embed') return !embedUrl.value
   if (id === 'description') return !descriptionText.value
   if (id === 'links') return links.value.length === 0
   return false
+}
+
+function firstOpenableTab() {
+  for (const t of tabDefs.value) {
+    if (t.id === 'cover') continue
+    if (!isTabDisabled(t.id)) return t.id
+  }
+  return hasTab('cover') ? 'cover' : (tabDefs.value[0]?.id || 'cover')
+}
+
+function sanitizeRequestedTab(requested) {
+  if (
+    typeof requested === 'string' &&
+    requested &&
+    hasTab(requested) &&
+    !isTabDisabled(requested)
+  ) {
+    return requested
+  }
+  return firstOpenableTab()
 }
 
 function abortInFlight() {
@@ -324,31 +346,23 @@ function reloadEmbed() {
   loadEmbed(raw)
 }
 
-function setTab(id) {
-  activeTab.value = id
-  emit('tab-change', id)
-}
-
-function firstContentTab() {
-  if (embedUrl.value) return 'embed'
-  if (descriptionText.value) return 'description'
-  if (links.value.length) return 'links'
-  return 'cover'
-}
-
 async function onCoverTab() {
   const url = props.tile?.cover || null
   if (url) {
     await preloadCover(url)
   }
-
-  activeTab.value = firstContentTab()
   emit('request-cover')
 }
 
 function onTabClick(id) {
-  if (id === 'cover') onCoverTab()
-  else setTab(id)
+  if (id === 'cover') {
+    onCoverTab()
+    return
+  }
+
+  const next = sanitizeRequestedTab(id)
+  activeTab.value = next
+  emit('tab-change', next)
 }
 
 watch(
@@ -360,62 +374,27 @@ watch(
 )
 
 watch(
-  () => props.tab,
-  (t) => {
-    if (typeof t === 'string' && t) {
-      activeTab.value = t
-    }
-  },
-  { immediate: true }
-)
-
-watch(
-  () => tabDefs.value,
+  () => [props.tab, props.flipped, tabDefs.value.map(t => t.id).join('|'), embedUrl.value, descriptionText.value, links.value.length],
   () => {
-    const ids = new Set(tabDefs.value.map((d) => d.id))
-    if (!ids.has(activeTab.value)) {
-      const first = tabDefs.value.find((d) => !isTabDisabled(d.id)) || tabDefs.value[0]
-      if (first?.id) setTab(first.id === 'cover' ? 'embed' : first.id)
-    }
+    activeTab.value = sanitizeRequestedTab(props.tab)
   },
   { immediate: true }
 )
 
 watch(
-  () => [props.flipped, activeTab.value, embedUrl.value, embedStart.value, obj.value?.id],
-  ([isFlipped, tab, url]) => {
-    if (!url) {
+  () => [props.flipped, activeTab.value, embedUrl.value, hasTab('embed')],
+  ([isFlipped, tab, url, embedAllowed]) => {
+    if (!embedAllowed || !url || tab !== 'embed' || !isFlipped) {
       abortInFlight()
       resetStateToIdle()
-
-      if (!props.tab) {
-        if (descriptionText.value) activeTab.value = 'description'
-        else if (links.value.length) activeTab.value = 'links'
-        else activeTab.value = 'cover'
-      }
       return
     }
 
-    if (isFlipped) {
-      if (tab === 'embed' && embedState.status === 'idle') {
-        loadEmbed(url)
-      }
-    } else {
-      abortInFlight()
-      resetStateToIdle()
+    if (embedState.status === 'idle') {
+      loadEmbed(url)
     }
   },
   { immediate: true }
-)
-
-watch(
-  () => props.flipped,
-  (isFlipped) => {
-    if (!isFlipped) return
-    if (!props.tab) {
-      activeTab.value = firstContentTab()
-    }
-  }
 )
 
 onBeforeUnmount(() => {
@@ -425,6 +404,7 @@ onBeforeUnmount(() => {
 function isExternal(u) {
   return typeof u === 'string' && /^https?:\/\//i.test(u)
 }
+
 function prettyUrl(u) {
   try {
     const url = new URL(u, window.location.origin)
@@ -433,6 +413,7 @@ function prettyUrl(u) {
     return u
   }
 }
+
 function hostLabel(u) {
   try {
     return new URL(u, window.location.origin).host.replace(/^www\./, '')
@@ -454,11 +435,7 @@ function hostLabel(u) {
   width: 100%;
   height: 100%;
   overflow: hidden;
-
   transform: translateZ(0);
-}
-
-.tile-front-only {
   background: rgba(0, 0, 0, 0.04);
 }
 
@@ -467,10 +444,8 @@ function hostLabel(u) {
   width: 100%;
   height: 100%;
   object-fit: cover;
-
   transform: translateZ(0);
   will-change: transform;
-
   backface-visibility: hidden;
 }
 

@@ -26,7 +26,7 @@
           :tab="tabFor(t)"
           :tabs="tabsForTile(t)"
           @tab-change="onTabChange(t, $event)"
-          @request-cover="flippedKey = null"
+          @request-cover="onRequestCover(t)"
         />
       </div>
     </div>
@@ -59,27 +59,18 @@ import TileAnchor from './TileAnchor.vue'
 import selfAvatar from '../assets/self-avatar.png'
 import otherAvatar from '../assets/other-avatar.png'
 
-/**
- * BEST UX SETTINGS
- * - Render on every move via RAF (drag + inertia)
- * - Fetch infra progressively while moving (throttled + deduped)
- */
 const WORLD = { z: 10, cols: 1024, rows: 1024, cellPx: 256 }
 const BACKEND_Y_IS_BOTTOM_ORIGIN = false
 
-// Fetch radii (pads):
 const PAD_ANCHORS = 12
 const PAD_INFRA_MOVE = 16
 const PAD_INFRA_END = 24
 const PAD_DRAW = 2
 
-// Move fetch throttle (ms)
 const INFRA_MOVE_THROTTLE_MS = 250
 
-// Role encoding (1 byte per tile)
 const ROLE = { NONE: 0, ROAD: 1, YBR: 2, PLAZA: 3 }
 
-// Anchor cache hygiene (future-proof)
 const ANCHOR_CACHE_MAX = 8000
 const ANCHOR_CACHE_TTL_MS = 30 * 60 * 1000
 const ANCHOR_CACHE_PRUNE_EVERY = 25
@@ -87,28 +78,7 @@ const anchorCacheSize = ref(0)
 
 const REALTIME_PATH = '/rt/'
 const PRESENCE_PANE = 'ewrmPresence'
-const PRESENCE_RADIUS = 18
 const PRESENCE_REGION_SIZE = 128
-
-const PRESENCE_STYLE_SELF = {
-  pane: PRESENCE_PANE,
-  radius: PRESENCE_RADIUS,
-  color: '#111111',
-  fillColor: '#ff5a36',
-  fillOpacity: 0.95,
-  weight: 1,
-  opacity: 1,
-}
-
-const PRESENCE_STYLE_OTHER = {
-  pane: PRESENCE_PANE,
-  radius: PRESENCE_RADIUS,
-  color: '#111111',
-  fillColor: '#00b7ff',
-  fillOpacity: 0.9,
-  weight: 1,
-  opacity: 1,
-}
 
 let socket = null
 let ownSocketId = null
@@ -183,6 +153,10 @@ function preloadAnchorCovers(list) {
   }
 }
 
+function onRequestCover(_t) {
+  flippedKey.value = null
+}
+
 // Anchor cache: key "x:y" (UI coords) -> anchor object {.., lastSeenMs}
 const anchorCache = new Map()
 let anchorPruneCounter = 0
@@ -197,7 +171,7 @@ const router = useRouter()
 
 const flippedKey = ref(null)
 
-// --- Tab registry (easy to extend) ---
+// --- Tab registry ---
 const TAB_SETS = {
   song: [
     { id: 'cover', label: 'Cover' },
@@ -212,8 +186,20 @@ const TAB_SETS = {
   ],
 }
 
+function keyForTile(t) {
+  return `${t.x}:${t.y}`
+}
+
+function activeCellMatchesTile(t) {
+  const a = activeCell.value?.anchor
+  if (!a || !t) return false
+  return Number(a.x) === Number(t.x) && Number(a.y) === Number(t.y)
+}
+
 function bundleForTile(t) {
-  if (isActive(t) && activeCell.value?.object?.bundle) return activeCell.value.object.bundle
+  if (activeCellMatchesTile(t) && activeCell.value?.object?.bundle) {
+    return activeCell.value.object.bundle
+  }
   return t?.object?.bundle || 'default'
 }
 
@@ -224,17 +210,66 @@ function tabsForTile(t) {
 
 // Persist selected tab per tile key ("x:y")
 const tabByKey = reactive(Object.create(null))
-function keyForTile(t) { return `${t.x}:${t.y}` }
+
+function objectForTile(t) {
+  if (activeCellMatchesTile(t) && activeCell.value?.object) {
+    return activeCell.value.object
+  }
+  return t?.object || null
+}
+
+function isTabOpenableForObject(obj, tabs, tabId) {
+  const ids = tabs.map(tab => tab.id)
+  if (!ids.includes(tabId)) return false
+  if (tabId === 'cover') return false
+
+  if (tabId === 'embed') {
+    return typeof obj?.embed_url === 'string' && obj.embed_url.trim().startsWith('http')
+  }
+
+  if (tabId === 'description') {
+    return typeof obj?.description === 'string' && obj.description.trim().length > 0
+  }
+
+  if (tabId === 'links') {
+    return Array.isArray(obj?.links) && obj.links.length > 0
+  }
+
+  return true
+}
+
+function firstOpenableTabForTile(t) {
+  const tabs = tabsForTile(t)
+  const obj = objectForTile(t)
+
+  for (const tab of tabs) {
+    if (tab.id === 'cover') continue
+    if (isTabOpenableForObject(obj, tabs, tab.id)) return tab.id
+  }
+
+  return 'cover'
+}
 
 function tabFor(t) {
   const key = keyForTile(t)
-  const tabs = tabsForTile(t)
-  return tabByKey[key] || tabs[0].id
+  const remembered = tabByKey[key]
+
+  if (remembered && isTabOpenableForObject(objectForTile(t), tabsForTile(t), remembered)) {
+    return remembered
+  }
+
+  return firstOpenableTabForTile(t)
 }
 
 function onTabChange(t, tab) {
   if (tab === 'cover') return
-  tabByKey[keyForTile(t)] = tab
+
+  const obj = objectForTile(t)
+  const tabs = tabsForTile(t)
+
+  if (isTabOpenableForObject(obj, tabs, tab)) {
+    tabByKey[keyForTile(t)] = tab
+  }
 }
 
 // Keep the active anchor mounted even if it falls out of viewport anchor list
@@ -504,7 +539,7 @@ function drawEmptyLandmark(ctx, x, y, px, py, cellPx) {
   }
 }
 
-/* ===== anchor cache helpers (LRU + TTL) ===== */
+/* ===== anchor cache helpers ===== */
 
 function anchorKey(x, yUi) {
   return `${x}:${yUi}`
@@ -548,7 +583,7 @@ function uiYToBackendY(yUi) {
   return (WORLD.rows - 1) - yUi
 }
 
-/* ===== CRS.Simple mapping (y down) ===== */
+/* ===== CRS.Simple mapping ===== */
 
 function tileTopLeftLatLng(x, yUi) {
   return L.latLng(-yUi * WORLD.cellPx, x * WORLD.cellPx)
@@ -1153,7 +1188,11 @@ async function refreshActiveCellIfNeeded() {
           : a
       )
 
-      if (!tabByKey[kk]) tabByKey[kk] = 'embed'
+      const remembered = tabByKey[kk]
+      const tabs = tabsForTile(fullAnchor)
+      if (!isTabOpenableForObject(fullAnchor.object, tabs, remembered)) {
+        tabByKey[kk] = firstOpenableTabForTile(fullAnchor)
+      }
     } else {
       pinnedAnchor.value = null
     }
@@ -1189,7 +1228,7 @@ async function centerDeepLinkIfNeeded() {
   const yBackend = uiYToBackendY(yUi)
 
   try {
-    const data = await fetchCell({ x, y: yBackend })
+    const data = await fetchCell({ x, y: yBackend, full: 1 })
     const ax = Number(data?.anchor?.x ?? x)
     const ayBackend = Number(data?.anchor?.y ?? yBackend)
     const aw = Math.max(1, Number(data?.anchor?.w ?? 1))
@@ -1360,9 +1399,8 @@ async function handleRoutePipeline() {
     !hasInitialized ||
     (source !== 'click' && (route.name === 'tile' || route.name === 'object'))
 
-  let deepLinkCell = null
   if (isDeepLinkCenterCase) {
-    deepLinkCell = await centerDeepLinkIfNeeded()
+    await centerDeepLinkIfNeeded()
   }
 
   if (source !== 'click' && route.name === 'tile') {
@@ -1370,19 +1408,25 @@ async function handleRoutePipeline() {
     const ry = Number(route.params.y)
 
     if (Number.isFinite(rx) && Number.isFinite(ry)) {
-      let data = deepLinkCell
+      const yBackend = uiYToBackendY(ry)
 
-      if (!data) {
-        const yBackend = uiYToBackendY(ry)
-        try {
-          data = await fetchCell({ x: rx, y: yBackend })
-        } catch (_) {
-          data = null
-        }
+      let data = null
+      try {
+        data = await fetchCell({ x: rx, y: yBackend, full: 1 })
+      } catch (_) {
+        data = null
       }
 
       const canFlip = data?.flippable === true
-      flippedKey.value = canFlip ? `${rx}:${ry}` : null
+
+      if (canFlip) {
+        const key = `${rx}:${ry}`
+        const fakeTile = { x: rx, y: ry, object: data?.object || null }
+        tabByKey[key] = firstOpenableTabForTile(fakeTile)
+        flippedKey.value = key
+      } else {
+        flippedKey.value = null
+      }
     }
   }
 
@@ -1875,13 +1919,6 @@ watch(
 )
 
 watch(
-  () => [route.name, route.params.x, route.params.y],
-  () => {
-    // no-op for now; movement is driven by actual clicks / connect join
-  }
-)
-
-watch(
   () => flippedKey.value,
   () => refreshActiveCellIfNeeded()
 )
@@ -1939,8 +1976,6 @@ onBeforeUnmount(() => {
 }
 
 .tile-shell.is-active {
-  /* outline: 4px solid rgba(0, 0, 0, 0.6);
-  outline-offset: -4px; */
   z-index: 5;
 }
 
