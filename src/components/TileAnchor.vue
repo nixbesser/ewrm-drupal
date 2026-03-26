@@ -106,11 +106,8 @@
         </div>
 
         <!-- COVER -->
-        <div v-if="hasTab('cover')" v-show="activeTab === 'cover'" class="panel__body">
-          <button class="coverBtn" type="button" @click.stop="onCoverTab()">
-            Return to cover
-          </button>
-
+        <div v-if="hasTab('cover') && activeTab === 'cover'"
+        class="panel__body">
           <div class="back__meta" style="margin-top: 10px;">
             <div><strong>tile:</strong> {{ tile.x }},{{ tile.y }} ({{ tile.w }}×{{ tile.h }})</div>
             <div v-if="obj?.bundle && obj?.slug">
