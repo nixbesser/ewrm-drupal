@@ -82,7 +82,7 @@
 
         <!-- DESCRIPTION -->
         <div v-if="hasTab('description')" v-show="activeTab === 'description'" class="panel__body">
-          <div v-if="descriptionText" class="prose tile-body">{{ descriptionText }}</div>
+          <div v-if="descriptionText" class="prose tile-body" v-html="descriptionText"></div>
           <div v-else class="back__hint">No description yet.</div>
         </div>
 
