@@ -525,7 +525,6 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       'cover' => $this->buildEntityCoverUrl($node, $cache),
     ];
 
-    // Optional: light hint for UI (song embeds), supports both old + new field names.
     $embed = $this->readFirstLinkUrl($node, ['field_embed_url', 'field_media_url']);
     $base['embed_url'] = $embed ?: null;
 
@@ -575,9 +574,9 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
   }
 
   private function buildTileCoverUrl($tile, CacheableMetadata $cache): ?string {
-    // 1) TILE override FIRST
-    if ($tile->hasField('field_cover') && !$tile->get('field_cover')->isEmpty()) {
-      $media = $tile->get('field_cover')->entity;
+    // 1) Tile-level override first.
+    if ($tile->hasField('field_cover_override') && !$tile->get('field_cover_override')->isEmpty()) {
+      $media = $tile->get('field_cover_override')->entity;
       if ($media) {
         $cache->addCacheableDependency($media);
 
@@ -591,26 +590,11 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       }
     }
 
-    // 2) FALLBACK to OBJECT cover
+    // 2) Fallback to the referenced object's permanent cover.
     if ($tile->hasField('field_object_reference') && !$tile->get('field_object_reference')->isEmpty()) {
       $object = $tile->get('field_object_reference')->entity;
       if ($object) {
-        $cache->addCacheableDependency($object);
-
-        if ($object->hasField('field_cover') && !$object->get('field_cover')->isEmpty()) {
-          $media = $object->get('field_cover')->entity;
-          if ($media) {
-            $cache->addCacheableDependency($media);
-
-            if ($media->hasField('field_media_image') && !$media->get('field_media_image')->isEmpty()) {
-              $file = $media->get('field_media_image')->entity;
-              if ($file) {
-                $cache->addCacheableDependency($file);
-                return $this->fileUrlGenerator->generateAbsoluteString($file->getFileUri());
-              }
-            }
-          }
-        }
+        return $this->buildEntityCoverUrl($object, $cache);
       }
     }
 
