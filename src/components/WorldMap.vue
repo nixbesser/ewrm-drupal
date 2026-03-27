@@ -884,6 +884,7 @@ function updateAnchorCameraLayer() {
 
 let gravelPattern = null
 let brickPattern = null
+let grassPattern = null
 
 function makeGravelPattern() {
   const c = document.createElement('canvas')
@@ -988,6 +989,27 @@ function makeBrickPattern() {
   return g.createPattern(c, 'repeat')
 }
 
+function makeGrassPattern() {
+  const c = document.createElement('canvas')
+  c.width = 128
+  c.height = 128
+  const g = c.getContext('2d')
+
+  // base
+  g.fillStyle = 'rgba(80, 140, 70, 0.9)'
+  g.fillRect(0, 0, c.width, c.height)
+
+  // blades / variation
+  for (let i = 0; i < 1500; i++) {
+    const x = Math.random() * c.width
+    const y = Math.random() * c.height
+    const h = Math.random() * 4 + 2
+    g.fillStyle = `rgba(40, ${100 + Math.random() * 80}, 40, 0.2)`
+    g.fillRect(x, y, 1, h)
+  }
+
+  return g.createPattern(c, 'repeat')
+}
 /* ===== anchors ===== */
 
 function tileStyle(t) {
@@ -1426,21 +1448,31 @@ function drawGrid() {
           ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
           ctx.globalAlpha = 1
         }
-      } else if (role === ROLE.ROAD) {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.10)'
-        ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+//       } else if (role === ROLE.ROAD) {
+//         ctx.fillStyle = 'rgba(0, 0, 0, 0.10)'
+//         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+//
+//         if (useTextures && gravelPattern) {
+//           ctx.fillStyle = gravelPattern
+//           ctx.globalAlpha = 1
+//           ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+//         }
+//
+//         if (useDetailEdges) {
+//           ctx.strokeStyle = 'rgba(0,0,0,0.12)'
+//           ctx.lineWidth = 1
+//           ctx.strokeRect(px + 0.5, py + 0.5, cellPxScreen - 1, cellPxScreen - 1)
+//         }
 
-        if (useTextures && gravelPattern) {
-          ctx.fillStyle = gravelPattern
-          ctx.globalAlpha = 1
-          ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
-        }
+} else if (role === ROLE.ROAD) {
+  ctx.fillStyle = 'rgba(80, 140, 70, 0.9)'
+  ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
 
-        if (useDetailEdges) {
-          ctx.strokeStyle = 'rgba(0,0,0,0.12)'
-          ctx.lineWidth = 1
-          ctx.strokeRect(px + 0.5, py + 0.5, cellPxScreen - 1, cellPxScreen - 1)
-        }
+  if (useTextures && grassPattern) {
+    ctx.fillStyle = grassPattern
+    ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+  }
+}
       } else if (role === ROLE.PLAZA) {
         ctx.fillStyle = 'rgba(90, 90, 90, 0.10)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
@@ -1889,6 +1921,8 @@ onMounted(async () => {
   const bounds = L.latLngBounds([0, 0], [-worldHeight, worldWidth])
 
   await new Promise(requestAnimationFrame)
+
+  grassPattern = makeGrassPattern()
 
   const containerWidth = mapEl.value.getBoundingClientRect().width
   const TILE_PX = WORLD.cellPx
