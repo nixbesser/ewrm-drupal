@@ -429,6 +429,9 @@ function drawEmptyLandscapeTile(ctx, x, y, px, py, cellPx) {
   if (kind === 'grass') {
     ctx.fillStyle = 'rgba(170, 186, 135, 0.32)'
     ctx.fillRect(px, py, cellPx, cellPx)
+    ctx.strokeStyle = 'rgba(0,0,0,0.06)'
+    ctx.lineWidth = 1
+    ctx.strokeRect(px + 0.5, py + 0.5, cellPxScreen - 1, cellPxScreen - 1)
   } else if (kind === 'dirt') {
     ctx.fillStyle = 'rgba(160, 136, 102, 0.28)'
     ctx.fillRect(px, py, cellPx, cellPx)
@@ -1492,22 +1495,18 @@ function drawGrid() {
           ctx.globalAlpha = 1
         }
       } else if (role === ROLE.ROAD) {
-        const r = cellPxScreen * 0.35
-
         ctx.fillStyle = 'rgba(80, 140, 70, 0.9)'
-        fillSmartRoundedRect(ctx, px, py, cellPxScreen, cellPxScreen, r, x, y)
+        ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
 
         if (useTextures && grassPattern) {
-          ctx.save()
-
-          fillSmartRoundedRect(ctx, px, py, cellPxScreen, cellPxScreen, r, x, y)
-          ctx.clip()
-
           ctx.fillStyle = grassPattern
           ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
-
-          ctx.restore()
         }
+
+        // subtle edge
+        ctx.strokeStyle = 'rgba(0,0,0,0.06)'
+        ctx.lineWidth = 1
+        ctx.strokeRect(px + 0.5, py + 0.5, cellPxScreen - 1, cellPxScreen - 1)
       } else if (role === ROLE.PLAZA) {
         ctx.fillStyle = 'rgba(90, 90, 90, 0.10)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
