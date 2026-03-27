@@ -563,6 +563,47 @@ function drawEmptyLandmark(ctx, x, y, px, py, cellPx) {
   }
 }
 
+function isRoad(x, y) {
+  if (x < 0 || y < 0 || x >= WORLD.cols || y >= WORLD.rows) return false
+  return infraGrid[idxOf(x, y)] === ROLE.ROAD
+}
+
+function fillSmartRoundedRect(ctx, x, y, w, h, r, tx, ty) {
+  const radius = Math.min(r, w / 2, h / 2)
+
+  const top = isRoad(tx, ty - 1)
+  const bottom = isRoad(tx, ty + 1)
+  const left = isRoad(tx - 1, ty)
+  const right = isRoad(tx + 1, ty)
+
+  const tl = !(top || left)
+  const tr = !(top || right)
+  const bl = !(bottom || left)
+  const br = !(bottom || right)
+
+  ctx.beginPath()
+
+  ctx.moveTo(x + (tl ? radius : 0), y)
+
+  // top edge
+  ctx.lineTo(x + w - (tr ? radius : 0), y)
+  if (tr) ctx.quadraticCurveTo(x + w, y, x + w, y + radius)
+
+  // right edge
+  ctx.lineTo(x + w, y + h - (br ? radius : 0))
+  if (br) ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h)
+
+  // bottom
+  ctx.lineTo(x + (bl ? radius : 0), y + h)
+  if (bl) ctx.quadraticCurveTo(x, y + h, x, y + h - radius)
+
+  // left
+  ctx.lineTo(x, y + (tl ? radius : 0))
+  if (tl) ctx.quadraticCurveTo(x, y, x + radius, y)
+
+  ctx.closePath()
+  ctx.fill()
+}
 /* ===== anchor cache helpers ===== */
 
 function anchorKey(x, yUi) {
@@ -1451,12 +1492,21 @@ function drawGrid() {
           ctx.globalAlpha = 1
         }
       } else if (role === ROLE.ROAD) {
+        const r = cellPxScreen * 0.35
+
         ctx.fillStyle = 'rgba(80, 140, 70, 0.9)'
-        ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+        fillSmartRoundedRect(ctx, px, py, cellPxScreen, cellPxScreen, r, x, y)
 
         if (useTextures && grassPattern) {
+          ctx.save()
+
+          fillSmartRoundedRect(ctx, px, py, cellPxScreen, cellPxScreen, r, x, y)
+          ctx.clip()
+
           ctx.fillStyle = grassPattern
           ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+
+          ctx.restore()
         }
       } else if (role === ROLE.PLAZA) {
         ctx.fillStyle = 'rgba(90, 90, 90, 0.10)'
