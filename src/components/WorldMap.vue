@@ -1420,9 +1420,11 @@ function drawGrid() {
   if (brickPattern?.setTransform) {
     brickPattern.setTransform(new DOMMatrix().translate(px0, py0))
   }
+  if (grassPattern?.setTransform) {
+    grassPattern.setTransform(new DOMMatrix().translate(px0, py0))
+  }
 
   const useTextures = cellPxScreen >= 40
-  const useDetailEdges = cellPxScreen >= 60
 
   for (let y = ymin; y <= ymax; y++) {
     const py = py0 + (y - ymin) * cellPxScreen
@@ -1448,31 +1450,14 @@ function drawGrid() {
           ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
           ctx.globalAlpha = 1
         }
-//       } else if (role === ROLE.ROAD) {
-//         ctx.fillStyle = 'rgba(0, 0, 0, 0.10)'
-//         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
-//
-//         if (useTextures && gravelPattern) {
-//           ctx.fillStyle = gravelPattern
-//           ctx.globalAlpha = 1
-//           ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
-//         }
-//
-//         if (useDetailEdges) {
-//           ctx.strokeStyle = 'rgba(0,0,0,0.12)'
-//           ctx.lineWidth = 1
-//           ctx.strokeRect(px + 0.5, py + 0.5, cellPxScreen - 1, cellPxScreen - 1)
-//         }
+      } else if (role === ROLE.ROAD) {
+        ctx.fillStyle = 'rgba(80, 140, 70, 0.9)'
+        ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
 
-} else if (role === ROLE.ROAD) {
-  ctx.fillStyle = 'rgba(80, 140, 70, 0.9)'
-  ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
-
-  if (useTextures && grassPattern) {
-    ctx.fillStyle = grassPattern
-    ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
-  }
-}
+        if (useTextures && grassPattern) {
+          ctx.fillStyle = grassPattern
+          ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+        }
       } else if (role === ROLE.PLAZA) {
         ctx.fillStyle = 'rgba(90, 90, 90, 0.10)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
