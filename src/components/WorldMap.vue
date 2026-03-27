@@ -44,6 +44,25 @@
       <div>activeCell: {{ activeCell ? 'yes' : 'no' }}</div>
       <div>users: {{ presenceCount }}</div>
     </div>
+
+    <div class="builder-ui">
+      <button @click="builderMode = !builderMode">
+        {{ builderMode ? 'Exit Builder' : 'Road Builder' }}
+      </button>
+
+      <button v-if="builderMode" @click="exportCSV">
+        Export CSV
+      </button>
+
+      <button v-if="builderMode" @click="clearSelection">
+        Clear
+      </button>
+
+      <span v-if="builderMode" style="background: rgba(255,255,255,0.9); padding: 6px 8px; border-radius: 6px;">
+        {{ selectedTiles.length }} selected
+      </span>
+    </div>
+
   </div>
 </template>
 
@@ -79,6 +98,11 @@ const anchorCacheSize = ref(0)
 const REALTIME_PATH = '/rt/'
 const PRESENCE_PANE = 'ewrmPresence'
 const PRESENCE_REGION_SIZE = 128
+
+// add builder state
+const builderMode = ref(false)
+const selectedTiles = ref([]) // ordered
+const selectedSet = new Set() // fast lookup
 
 let socket = null
 let ownSocketId = null
@@ -707,7 +731,75 @@ async function handleTileClick(t, event = null) {
   router.push({ name: 'tile', params: { z: WORLD.z, x: t.x, y: t.y } })
 }
 
+let builderLayer = null
+
+function ensureBuilderLayer() {
+  if (!builderLayer) {
+    builderLayer = L.layerGroup().addTo(map)
+  }
+}
+
+function renderBuilderOverlay() {
+  if (!map) return
+  ensureBuilderLayer()
+  builderLayer.clearLayers()
+
+  selectedTiles.value.forEach(({ x, y }) => {
+    const nw = tileTopLeftLatLng(x, y)
+    const se = tileTopLeftLatLng(x + 1, y + 1)
+
+    L.rectangle([nw, se], {
+      color: '#00ffff',
+      weight: 1,
+      fillColor: '#00ffff',
+      fillOpacity: 0.25,
+      interactive: false,
+    }).addTo(builderLayer)
+  })
+}
+
+function exportCSV() {
+  const rows = ['x,y,z,role,ddt,flippable,title,tile_key']
+
+  selectedTiles.value.forEach(({ x, y }) => {
+    rows.push(`${x},${y},10,road,1,0,Road 10:${x}:${y},10:${x}:${y}`)
+  })
+
+  const blob = new Blob([rows.join('\n')], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'road.csv'
+  a.click()
+
+  URL.revokeObjectURL(url)
+}
+
+function clearSelection() {
+  selectedTiles.value = []
+  selectedSet.clear()
+  renderBuilderOverlay()
+}
+
 function onTileClick(t, event) {
+  if (builderMode.value) {
+    const x = Number(t.x)
+    const y = Number(t.y)
+    const key = `${x}:${y}`
+
+    if (selectedSet.has(key)) {
+      selectedSet.delete(key)
+      selectedTiles.value = selectedTiles.value.filter(tile => tile.key !== key)
+    } else {
+      selectedSet.add(key)
+      selectedTiles.value.push({ x, y, key })
+    }
+
+    renderBuilderOverlay()
+    return
+  }
+
   if (t?.flippable === false) return
   handleTileClick(t, event)
 }
@@ -1891,7 +1983,27 @@ onMounted(async () => {
     if (didMoveSinceDown) return
 
     const target = e.originalEvent?.target
-    if (target && target.closest && target.closest('.tile-shell')) return
+    const clickedAnchor = !!(target && target.closest && target.closest('.tile-shell'))
+
+    if (builderMode.value) {
+      if (clickedAnchor) return
+
+      const { x, y } = latLngToTileHit(e.latlng)
+      const key = `${x}:${y}`
+
+      if (selectedSet.has(key)) {
+        selectedSet.delete(key)
+        selectedTiles.value = selectedTiles.value.filter(tile => tile.key !== key)
+      } else {
+        selectedSet.add(key)
+        selectedTiles.value.push({ x, y, key })
+      }
+
+      renderBuilderOverlay()
+      return
+    }
+
+    if (clickedAnchor) return
 
     if (flippedKey.value) {
       return
@@ -1996,4 +2108,14 @@ onBeforeUnmount(() => {
   color: #111;
   pointer-events: none;
 }
+
+.builder-ui {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  z-index: 1000;
+  display: flex;
+  gap: 8px;
+}
+
 </style>
