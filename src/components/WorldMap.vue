@@ -2198,16 +2198,17 @@ const vehicleStyle = computed(() => {
   const px = camL.px0 + (vehicle.x - camL.xmin) * cell
   const py = camL.py0 + (vehicle.y - camL.ymin) * cell
 
-  const size = cell * 0.9
+  const width = cell * 0.9
+  const height = cell * 0.52
   const angle = Math.atan2(vehicle.dir[1], vehicle.dir[0]) * 180 / Math.PI
 
   return {
     transform: `
-      translate3d(${Math.round(px - size / 2)}px, ${Math.round(py - size / 2)}px, 0)
+      translate3d(${Math.round(px - width / 2)}px, ${Math.round(py - height / 2)}px, 0)
       rotate(${angle}deg)
     `,
-    width: `${size}px`,
-    height: `${size}px`,
+    width: `${Math.round(width)}px`,
+    height: `${Math.round(height)}px`,
   }
 })
 </script>
@@ -2275,12 +2276,26 @@ const vehicleStyle = computed(() => {
 
 .vehicle {
   position: absolute;
-  background: red;
-  border-radius: 50%;
+  background: #d22;
+  border-radius: 10px;
   z-index: 200;
   pointer-events: none;
   transform-origin: center center;
-  box-shadow: 0 0 0 3px rgba(255,255,255,0.85);
+  box-shadow:
+    0 0 0 3px rgba(255,255,255,0.85),
+    inset 0 -2px 0 rgba(0,0,0,0.18);
   opacity: 1;
+}
+
+.vehicle::after {
+  content: '';
+  position: absolute;
+  right: 10%;
+  top: 50%;
+  width: 18%;
+  height: 18%;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.9);
+  transform: translateY(-50%);
 }
 </style>
