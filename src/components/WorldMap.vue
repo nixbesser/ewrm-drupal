@@ -71,6 +71,10 @@
       >
         {{ selectedTiles.length }} selected
       </span>
+
+      <button @click="centerOnVehicle">Center on Bus</button>
+      <button @click="followVehicle = !followVehicle">{{ followVehicle ? 'Stop Following Bus' : 'Follow Bus' }}</button>
+
     </div>
   </div>
 </template>
@@ -113,12 +117,18 @@ const vehicle = reactive({
   y: 0.5,
   dir: [1, 0],
   speed: 2.0,
-  initialized: false,
   visible: false,
 })
 
-let lastVehicleTime = null
-let lastVehicleTile = { x: null, y: null }
+const vehicleTarget = reactive({
+  x: 0.5,
+  y: 0.5,
+  dir: [1, 0],
+  speed: 2.0,
+  visible: false,
+})
+
+const followVehicle = ref(false)
 
 const builderMode = ref(false)
 const selectedTiles = ref([])
@@ -685,127 +695,124 @@ function latLngToTileHit(latlng) {
   return { x, y, ox, oy }
 }
 
+// /* ===== vehicle helpers ===== */
+//
+// function findNearestYBRToCenter() {
+//   if (!map) return null
+//
+//   const center = latLngToTileXY(map.getCenter())
+//   const maxRadius = 200
+//
+//   for (let r = 0; r <= maxRadius; r++) {
+//     for (let y = center.y - r; y <= center.y + r; y++) {
+//       for (let x = center.x - r; x <= center.x + r; x++) {
+//         if (x < 0 || y < 0 || x >= WORLD.cols || y >= WORLD.rows) continue
+//         if (infraGrid[idxOf(x, y)] === ROLE.YBR) {
+//           return { x, y }
+//         }
+//       }
+//     }
+//   }
+//
+//   return null
+// }
+//
+// function isYBR(x, y) {
+//   if (x < 0 || y < 0 || x >= WORLD.cols || y >= WORLD.rows) return false
+//   return infraGrid[idxOf(x, y)] === ROLE.YBR
+// }
+//
+// function getYBRNeighbors(x, y) {
+//   const n = []
+//
+//   if (isYBR(x + 1, y)) n.push([x + 1, y])
+//   if (isYBR(x - 1, y)) n.push([x - 1, y])
+//   if (isYBR(x, y + 1)) n.push([x, y + 1])
+//   if (isYBR(x, y - 1)) n.push([x, y - 1])
+//
+//   return n
+// }
+//
+// function initVehicleIfNeeded() {
+//   if (vehicle.initialized || infraCount.value === 0) return
+//
+//   const start = findNearestYBRToCenter()
+//   if (!start) return
+//
+//   vehicle.x = start.x + 0.5
+//   vehicle.y = start.y + 0.5
+//   vehicle.dir = [1, 0]
+//   vehicle.initialized = true
+//   vehicle.visible = true
+//   lastVehicleTile = { x: Math.floor(vehicle.x), y: Math.floor(vehicle.y) }
+//   lastVehicleTime = null
+// }
+//
+// function updateVehicle() {
+//   if (infraCount.value === 0) return
+//   if (!vehicle.initialized) initVehicleIfNeeded()
+//   if (!vehicle.initialized) return
+//
+//   const now = performance.now()
+//
+//   if (lastVehicleTime == null) {
+//     lastVehicleTime = now
+//     return
+//   }
+//
+//   const dt = Math.min((now - lastVehicleTime) / 1000, 0.1)
+//   lastVehicleTime = now
+//
+//   const dx = vehicle.dir[0] * vehicle.speed * dt
+//   const dy = vehicle.dir[1] * vehicle.speed * dt
+//
+//   vehicle.x += dx
+//   vehicle.y += dy
+//
+//   handleVehicleTileTransition()
+// }
+
+
 /* ===== vehicle helpers ===== */
 
-function findNearestYBRToCenter() {
-  if (!map) return null
+function applyVehiclePayload(payload) {
+  const x = Number(payload?.x)
+  const y = Number(payload?.y)
+  const dx = Number(payload?.dir?.[0] ?? 0)
+  const dy = Number(payload?.dir?.[1] ?? 0)
+  const speed = Number(payload?.speed ?? 0)
 
-  const center = latLngToTileXY(map.getCenter())
-  const maxRadius = 200
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return
 
-  for (let r = 0; r <= maxRadius; r++) {
-    for (let y = center.y - r; y <= center.y + r; y++) {
-      for (let x = center.x - r; x <= center.x + r; x++) {
-        if (x < 0 || y < 0 || x >= WORLD.cols || y >= WORLD.rows) continue
-        if (infraGrid[idxOf(x, y)] === ROLE.YBR) {
-          return { x, y }
-        }
-      }
-    }
+  vehicleTarget.x = x
+  vehicleTarget.y = y
+  vehicleTarget.dir = [dx, dy]
+  vehicleTarget.speed = Number.isFinite(speed) ? speed : 0
+  vehicleTarget.visible = true
+
+  if (!vehicle.visible) {
+    vehicle.x = x
+    vehicle.y = y
+    vehicle.dir = [dx, dy]
+    vehicle.speed = vehicleTarget.speed
+    vehicle.visible = true
   }
-
-  return null
 }
 
-function isYBR(x, y) {
-  if (x < 0 || y < 0 || x >= WORLD.cols || y >= WORLD.rows) return false
-  return infraGrid[idxOf(x, y)] === ROLE.YBR
-}
+function updateVehicleRender() {
+  if (!vehicleTarget.visible) return
 
-function getYBRNeighbors(x, y) {
-  const n = []
+  const lerp = 0.2
 
-  if (isYBR(x + 1, y)) n.push([x + 1, y])
-  if (isYBR(x - 1, y)) n.push([x - 1, y])
-  if (isYBR(x, y + 1)) n.push([x, y + 1])
-  if (isYBR(x, y - 1)) n.push([x, y - 1])
+  vehicle.x += (vehicleTarget.x - vehicle.x) * lerp
+  vehicle.y += (vehicleTarget.y - vehicle.y) * lerp
 
-  return n
-}
-
-function initVehicleIfNeeded() {
-  if (vehicle.initialized || infraCount.value === 0) return
-
-  const start = findNearestYBRToCenter()
-  if (!start) return
-
-  vehicle.x = start.x + 0.5
-  vehicle.y = start.y + 0.5
-  vehicle.dir = [1, 0]
-  vehicle.initialized = true
+  vehicle.dir = [...vehicleTarget.dir]
+  vehicle.speed = vehicleTarget.speed
   vehicle.visible = true
-  lastVehicleTile = { x: Math.floor(vehicle.x), y: Math.floor(vehicle.y) }
-  lastVehicleTime = null
 }
 
-function updateVehicle() {
-  if (infraCount.value === 0) return
-  if (!vehicle.initialized) initVehicleIfNeeded()
-  if (!vehicle.initialized) return
 
-  const now = performance.now()
-
-  if (lastVehicleTime == null) {
-    lastVehicleTime = now
-    return
-  }
-
-  const dt = Math.min((now - lastVehicleTime) / 1000, 0.1)
-  lastVehicleTime = now
-
-  const dx = vehicle.dir[0] * vehicle.speed * dt
-  const dy = vehicle.dir[1] * vehicle.speed * dt
-
-  vehicle.x += dx
-  vehicle.y += dy
-
-  handleVehicleTileTransition()
-}
-
-function handleVehicleTileTransition() {
-  const tx = Math.floor(vehicle.x)
-  const ty = Math.floor(vehicle.y)
-
-  if (tx === lastVehicleTile.x && ty === lastVehicleTile.y) return
-  lastVehicleTile = { x: tx, y: ty }
-
-  const neighbors = getYBRNeighbors(tx, ty)
-
-  if (!neighbors.length) {
-    vehicle.x = tx + 0.5
-    vehicle.y = ty + 0.5
-    vehicle.dir = [0, 0]
-    return
-  }
-
-  const reverseX = -vehicle.dir[0]
-  const reverseY = -vehicle.dir[1]
-
-  const forward = neighbors.filter(([nx, ny]) => {
-    const dx = nx - tx
-    const dy = ny - ty
-    return !(dx === reverseX && dy === reverseY)
-  })
-
-  const options = forward.length ? forward : neighbors
-
-  const scored = options.map(([nx, ny]) => {
-    const dx = nx - tx
-    const dy = ny - ty
-    const score = (dx * vehicle.dir[0]) + (dy * vehicle.dir[1])
-    return { nx, ny, score }
-  })
-
-  scored.sort((a, b) => b.score - a.score)
-
-  const bestScore = scored[0]?.score ?? 0
-  const bestOptions = scored.filter(item => item.score === bestScore)
-  const pick = bestOptions[Math.floor(Math.random() * bestOptions.length)]
-
-  if (!pick) return
-
-  vehicle.dir = [pick.nx - tx, pick.ny - ty]
-}
 
 /* ===== infra helpers ===== */
 
@@ -1229,14 +1236,18 @@ function updateHud() {
 }
 
 /* ===== API: anchors ===== */
+let lastViewportKey = ''
 
 async function refreshViewport() {
   if (!map) return
 
+  const ui = tileBoundsWithPad_UI(PAD_ANCHORS)
+  const key = `${ui.xmin}-${ui.xmax}-${ui.ymin}-${ui.ymax}`
+  if (key === lastViewportKey) return
+  lastViewportKey = key
+
   try { viewportAbort?.abort() } catch (_) {}
   viewportAbort = new AbortController()
-
-  const ui = tileBoundsWithPad_UI(PAD_ANCHORS)
 
   const by1 = uiYToBackendY(ui.ymin)
   const by2 = uiYToBackendY(ui.ymax)
@@ -1307,7 +1318,6 @@ async function refreshViewport() {
     console.error(err)
   }
 }
-
 /* ===== API: infra ===== */
 
 const infraFetchedRects = []
@@ -1328,22 +1338,32 @@ function rememberFetched(rect) {
 let infraMoveTimer = 0
 let infraMoveScheduled = false
 
+let infraAbort = null
+
 async function refreshInfraForRect_UI(uiRect) {
   if (!map) return
   if (alreadyFetched(uiRect)) return
+
+  try { infraAbort?.abort() } catch (_) {}
+  infraAbort = new AbortController()
 
   const by1 = uiYToBackendY(uiRect.ymin)
   const by2 = uiYToBackendY(uiRect.ymax)
   const yminBackend = Math.min(by1, by2)
   const ymaxBackend = Math.max(by1, by2)
 
-  const data = await fetchInfra({
-    z: WORLD.z,
-    xmin: uiRect.xmin,
-    xmax: uiRect.xmax,
-    ymin: yminBackend,
-    ymax: ymaxBackend,
-  })
+  const data = await fetchInfra(
+    {
+      z: WORLD.z,
+      xmin: uiRect.xmin,
+      xmax: uiRect.xmax,
+      ymin: yminBackend,
+      ymax: ymaxBackend,
+    },
+    {
+      signal: infraAbort.signal,
+    }
+  )
 
   for (const t of data) {
     const x = Number(t.x)
@@ -1397,8 +1417,6 @@ async function refreshInfraMoveEnd() {
     hud.err = String(err?.message || err)
     console.error(err)
   }
-
-  initVehicleIfNeeded()
 }
 
 /* ===== active cell ===== */
@@ -1667,7 +1685,12 @@ function scheduleFrame() {
 
     updateCellPxLayer()
     updateAnchorCameraLayer()
-    updateVehicle()
+    updateVehicleRender()
+    if (followVehicle.value && map && vehicle.visible && !isMoving) {
+      const lat = -(vehicle.y * WORLD.cellPx)
+      const lng = vehicle.x * WORLD.cellPx
+      map.panTo(L.latLng(lat, lng), { animate: false })
+    }
     drawGrid()
     updateHud()
 
@@ -2014,6 +2037,8 @@ function initRealtime() {
     transports: ['websocket'],
   })
 
+  window.socket = socket
+
   socket.on('connect', () => {
     ownSocketId = socket.id || null
     lastViewportRegions = []
@@ -2026,6 +2051,14 @@ function initRealtime() {
     ownSocketId = null
     lastViewportRegions = []
     clearPresenceMarkers()
+  })
+
+  socket.on('vehicle:snapshot', (payload) => {
+    applyVehiclePayload(payload)
+  })
+
+  socket.on('vehicle:update', (payload) => {
+    applyVehiclePayload(payload)
   })
 
   socket.on('presence:snapshot', (payload) => {
@@ -2057,18 +2090,38 @@ function initRealtime() {
   })
 }
 
+
+function centerOnVehicle() {
+  if (!map || !vehicle.visible) return
+
+  const lat = -(vehicle.y * WORLD.cellPx)
+  const lng = vehicle.x * WORLD.cellPx
+
+  map.setView(L.latLng(lat, lng), map.getZoom(), { animate: false })
+}
+
+
 function destroyRealtime() {
   if (!socket) return
+
   socket.off('connect')
   socket.off('disconnect')
+  socket.off('vehicle:snapshot')
+  socket.off('vehicle:update')
   socket.off('presence:snapshot')
   socket.off('presence:update')
   socket.off('presence:leave')
   socket.disconnect()
+
   socket = null
   ownSocketId = null
   lastViewportRegions = []
   clearPresenceMarkers()
+
+  delete window.socket
+
+  vehicle.visible = false
+  vehicleTarget.visible = false
 }
 
 /* ===== lifecycle ===== */
@@ -2148,9 +2201,9 @@ onMounted(async () => {
     isMoving = true
   })
 
-  map.on('move', () => {
-    requestInfraWhileMoving()
-  })
+  // map.on('move', () => {
+  //   requestInfraWhileMoving()
+  // })
 
   map.on('moveend', async () => {
     if (infraMoveTimer) clearTimeout(infraMoveTimer)
