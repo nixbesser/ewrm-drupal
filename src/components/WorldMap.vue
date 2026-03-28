@@ -10,8 +10,7 @@
         :key="`${t.x}:${t.y}`"
         v-memo="[
           t.x, t.y, t.w, t.h, t.cover, t.flippable, t.ddt,
-          isFlipped(t), isActive(t), tabFor(t),
-          tabsForTile(t)
+          isFlipped(t), isActive(t), tabFor(t), tabsForTile(t)
         ]"
         class="tile-shell"
         :data-ddt="t.ddt ? '1' : '0'"
@@ -73,8 +72,9 @@
       </span>
 
       <button @click="centerOnVehicle">Center on Bus</button>
-      <button @click="followVehicle = !followVehicle">{{ followVehicle ? 'Stop Following Bus' : 'Follow Bus' }}</button>
-
+      <button @click="followVehicle = !followVehicle">
+        {{ followVehicle ? 'Stop Following Bus' : 'Follow Bus' }}
+      </button>
     </div>
   </div>
 </template>
@@ -95,11 +95,8 @@ const WORLD = { z: 10, cols: 1024, rows: 1024, cellPx: 256 }
 const BACKEND_Y_IS_BOTTOM_ORIGIN = false
 
 const PAD_ANCHORS = 12
-const PAD_INFRA_MOVE = 16
 const PAD_INFRA_END = 24
 const PAD_DRAW = 2
-
-const INFRA_MOVE_THROTTLE_MS = 250
 
 const ROLE = { NONE: 0, ROAD: 1, YBR: 2, PLAZA: 3 }
 
@@ -116,7 +113,7 @@ const vehicle = reactive({
   x: 0.5,
   y: 0.5,
   dir: [1, 0],
-  speed: 2.0,
+  speed: 0,
   visible: false,
 })
 
@@ -124,11 +121,13 @@ const vehicleTarget = reactive({
   x: 0.5,
   y: 0.5,
   dir: [1, 0],
-  speed: 2.0,
+  speed: 0,
   visible: false,
 })
 
 const followVehicle = ref(false)
+let lastFollowPanMs = 0
+const FOLLOW_PAN_INTERVAL_MS = 120
 
 const builderMode = ref(false)
 const selectedTiles = ref([])
@@ -207,7 +206,7 @@ function preloadAnchorCovers(list) {
   }
 }
 
-function onRequestCover(_t) {
+function onRequestCover() {
   flippedKey.value = null
 }
 
@@ -695,84 +694,6 @@ function latLngToTileHit(latlng) {
   return { x, y, ox, oy }
 }
 
-// /* ===== vehicle helpers ===== */
-//
-// function findNearestYBRToCenter() {
-//   if (!map) return null
-//
-//   const center = latLngToTileXY(map.getCenter())
-//   const maxRadius = 200
-//
-//   for (let r = 0; r <= maxRadius; r++) {
-//     for (let y = center.y - r; y <= center.y + r; y++) {
-//       for (let x = center.x - r; x <= center.x + r; x++) {
-//         if (x < 0 || y < 0 || x >= WORLD.cols || y >= WORLD.rows) continue
-//         if (infraGrid[idxOf(x, y)] === ROLE.YBR) {
-//           return { x, y }
-//         }
-//       }
-//     }
-//   }
-//
-//   return null
-// }
-//
-// function isYBR(x, y) {
-//   if (x < 0 || y < 0 || x >= WORLD.cols || y >= WORLD.rows) return false
-//   return infraGrid[idxOf(x, y)] === ROLE.YBR
-// }
-//
-// function getYBRNeighbors(x, y) {
-//   const n = []
-//
-//   if (isYBR(x + 1, y)) n.push([x + 1, y])
-//   if (isYBR(x - 1, y)) n.push([x - 1, y])
-//   if (isYBR(x, y + 1)) n.push([x, y + 1])
-//   if (isYBR(x, y - 1)) n.push([x, y - 1])
-//
-//   return n
-// }
-//
-// function initVehicleIfNeeded() {
-//   if (vehicle.initialized || infraCount.value === 0) return
-//
-//   const start = findNearestYBRToCenter()
-//   if (!start) return
-//
-//   vehicle.x = start.x + 0.5
-//   vehicle.y = start.y + 0.5
-//   vehicle.dir = [1, 0]
-//   vehicle.initialized = true
-//   vehicle.visible = true
-//   lastVehicleTile = { x: Math.floor(vehicle.x), y: Math.floor(vehicle.y) }
-//   lastVehicleTime = null
-// }
-//
-// function updateVehicle() {
-//   if (infraCount.value === 0) return
-//   if (!vehicle.initialized) initVehicleIfNeeded()
-//   if (!vehicle.initialized) return
-//
-//   const now = performance.now()
-//
-//   if (lastVehicleTime == null) {
-//     lastVehicleTime = now
-//     return
-//   }
-//
-//   const dt = Math.min((now - lastVehicleTime) / 1000, 0.1)
-//   lastVehicleTime = now
-//
-//   const dx = vehicle.dir[0] * vehicle.speed * dt
-//   const dy = vehicle.dir[1] * vehicle.speed * dt
-//
-//   vehicle.x += dx
-//   vehicle.y += dy
-//
-//   handleVehicleTileTransition()
-// }
-
-
 /* ===== vehicle helpers ===== */
 
 function applyVehiclePayload(payload) {
@@ -802,7 +723,7 @@ function applyVehiclePayload(payload) {
 function updateVehicleRender() {
   if (!vehicleTarget.visible) return
 
-  const lerp = 0.2
+  const lerp = 0.1
 
   vehicle.x += (vehicleTarget.x - vehicle.x) * lerp
   vehicle.y += (vehicleTarget.y - vehicle.y) * lerp
@@ -812,7 +733,14 @@ function updateVehicleRender() {
   vehicle.visible = true
 }
 
+function centerOnVehicle() {
+  if (!map || !vehicle.visible) return
 
+  const lat = -(vehicle.y * WORLD.cellPx)
+  const lng = vehicle.x * WORLD.cellPx
+
+  map.setView(L.latLng(lat, lng), map.getZoom(), { animate: false })
+}
 
 /* ===== infra helpers ===== */
 
@@ -1236,6 +1164,7 @@ function updateHud() {
 }
 
 /* ===== API: anchors ===== */
+
 let lastViewportKey = ''
 
 async function refreshViewport() {
@@ -1318,6 +1247,7 @@ async function refreshViewport() {
     console.error(err)
   }
 }
+
 /* ===== API: infra ===== */
 
 const infraFetchedRects = []
@@ -1335,35 +1265,22 @@ function rememberFetched(rect) {
   if (infraFetchedRects.length > 80) infraFetchedRects.splice(0, 20)
 }
 
-let infraMoveTimer = 0
-let infraMoveScheduled = false
-
-let infraAbort = null
-
 async function refreshInfraForRect_UI(uiRect) {
   if (!map) return
   if (alreadyFetched(uiRect)) return
-
-  try { infraAbort?.abort() } catch (_) {}
-  infraAbort = new AbortController()
 
   const by1 = uiYToBackendY(uiRect.ymin)
   const by2 = uiYToBackendY(uiRect.ymax)
   const yminBackend = Math.min(by1, by2)
   const ymaxBackend = Math.max(by1, by2)
 
-  const data = await fetchInfra(
-    {
-      z: WORLD.z,
-      xmin: uiRect.xmin,
-      xmax: uiRect.xmax,
-      ymin: yminBackend,
-      ymax: ymaxBackend,
-    },
-    {
-      signal: infraAbort.signal,
-    }
-  )
+  const data = await fetchInfra({
+    z: WORLD.z,
+    xmin: uiRect.xmin,
+    xmax: uiRect.xmax,
+    ymin: yminBackend,
+    ymax: ymaxBackend,
+  })
 
   for (const t of data) {
     const x = Number(t.x)
@@ -1384,28 +1301,6 @@ async function refreshInfraForRect_UI(uiRect) {
   rememberFetched(uiRect)
 }
 
-function requestInfraWhileMoving() {
-  if (!map) return
-  if (infraMoveScheduled) return
-  infraMoveScheduled = true
-
-  infraMoveTimer = window.setTimeout(async () => {
-    infraMoveScheduled = false
-    if (!map) return
-
-    const ui = tileBoundsWithPad_UI(PAD_INFRA_MOVE)
-
-    try {
-      await refreshInfraForRect_UI(ui)
-      scheduleFrame()
-    } catch (err) {
-      if (err?.name === 'AbortError') return
-      hud.err = String(err?.message || err)
-      console.error(err)
-    }
-  }, INFRA_MOVE_THROTTLE_MS)
-}
-
 async function refreshInfraMoveEnd() {
   if (!map) return
   const ui = tileBoundsWithPad_UI(PAD_INFRA_END)
@@ -1413,7 +1308,6 @@ async function refreshInfraMoveEnd() {
   try {
     await refreshInfraForRect_UI(ui)
   } catch (err) {
-    if (err?.name === 'AbortError') return
     hud.err = String(err?.message || err)
     console.error(err)
   }
@@ -1686,11 +1580,17 @@ function scheduleFrame() {
     updateCellPxLayer()
     updateAnchorCameraLayer()
     updateVehicleRender()
+
     if (followVehicle.value && map && vehicle.visible && !isMoving) {
-      const lat = -(vehicle.y * WORLD.cellPx)
-      const lng = vehicle.x * WORLD.cellPx
-      map.panTo(L.latLng(lat, lng), { animate: false })
+      const now = performance.now()
+      if (now - lastFollowPanMs >= FOLLOW_PAN_INTERVAL_MS) {
+        const lat = -(vehicle.y * WORLD.cellPx)
+        const lng = vehicle.x * WORLD.cellPx
+        map.setView(L.latLng(lat, lng), map.getZoom(), { animate: false })
+        lastFollowPanMs = now
+      }
     }
+
     drawGrid()
     updateHud()
 
@@ -2090,17 +1990,6 @@ function initRealtime() {
   })
 }
 
-
-function centerOnVehicle() {
-  if (!map || !vehicle.visible) return
-
-  const lat = -(vehicle.y * WORLD.cellPx)
-  const lng = vehicle.x * WORLD.cellPx
-
-  map.setView(L.latLng(lat, lng), map.getZoom(), { animate: false })
-}
-
-
 function destroyRealtime() {
   if (!socket) return
 
@@ -2201,15 +2090,7 @@ onMounted(async () => {
     isMoving = true
   })
 
-  // map.on('move', () => {
-  //   requestInfraWhileMoving()
-  // })
-
   map.on('moveend', async () => {
-    if (infraMoveTimer) clearTimeout(infraMoveTimer)
-    infraMoveTimer = 0
-    infraMoveScheduled = false
-
     setTimeout(() => { didMoveSinceDown = false }, 0)
 
     try {
@@ -2280,10 +2161,6 @@ watch(
 onBeforeUnmount(() => {
   try { cellAbort?.abort() } catch (_) {}
   try { viewportAbort?.abort() } catch (_) {}
-
-  if (infraMoveTimer) clearTimeout(infraMoveTimer)
-  infraMoveTimer = 0
-  infraMoveScheduled = false
 
   if (raf) cancelAnimationFrame(raf)
 
