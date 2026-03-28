@@ -2286,6 +2286,7 @@ const vehicleStyle = computed(() => {
   z-index: 20;
 }
 
+
 .tile-shell {
   position: absolute;
   left: 0;
