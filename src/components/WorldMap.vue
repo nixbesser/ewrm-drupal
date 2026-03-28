@@ -127,7 +127,7 @@ const vehicleTarget = reactive({
 
 const followVehicle = ref(false)
 let lastFollowPanMs = 0
-const FOLLOW_PAN_INTERVAL_MS = 120
+const FOLLOW_PAN_INTERVAL_MS = 180
 
 const builderMode = ref(false)
 const selectedTiles = ref([])
@@ -723,7 +723,7 @@ function applyVehiclePayload(payload) {
 function updateVehicleRender() {
   if (!vehicleTarget.visible) return
 
-  const lerp = 0.1
+  const lerp = 0.18
 
   vehicle.x += (vehicleTarget.x - vehicle.x) * lerp
   vehicle.y += (vehicleTarget.y - vehicle.y) * lerp
@@ -1583,10 +1583,24 @@ function scheduleFrame() {
 
     if (followVehicle.value && map && vehicle.visible && !isMoving) {
       const now = performance.now()
+
       if (now - lastFollowPanMs >= FOLLOW_PAN_INTERVAL_MS) {
-        const lat = -(vehicle.y * WORLD.cellPx)
-        const lng = vehicle.x * WORLD.cellPx
-        map.setView(L.latLng(lat, lng), map.getZoom(), { animate: false })
+        const target = L.latLng(-(vehicle.y * WORLD.cellPx), vehicle.x * WORLD.cellPx)
+        const center = map.getCenter()
+
+        const dx = target.lng - center.lng
+        const dy = target.lat - center.lat
+        const dist = Math.sqrt((dx * dx) + (dy * dy))
+
+        const deadZone = WORLD.cellPx * 0.35
+
+        if (dist > deadZone) {
+          map.panTo(target, {
+            animate: true,
+            duration: 0.35,
+          })
+        }
+
         lastFollowPanMs = now
       }
     }
