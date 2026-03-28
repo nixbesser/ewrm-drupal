@@ -29,6 +29,12 @@
           @request-cover="onRequestCover(t)"
         />
       </div>
+
+      <div
+        v-if="vehicle.visible"
+        class="vehicle"
+        :style="vehicleStyle"
+      ></div>
     </div>
 
     <div class="hud">
@@ -43,6 +49,7 @@
       <div>infra(nonzero): {{ infraCount }}</div>
       <div>activeCell: {{ activeCell ? 'yes' : 'no' }}</div>
       <div>users: {{ presenceCount }}</div>
+      <div>vehicle: {{ vehicle.visible ? 'yes' : 'no' }}</div>
     </div>
 
     <div class="builder-ui">
@@ -58,11 +65,13 @@
         Clear
       </button>
 
-      <span v-if="builderMode" style="background: rgba(255,255,255,0.9); padding: 6px 8px; border-radius: 6px;">
+      <span
+        v-if="builderMode"
+        style="background: rgba(255,255,255,0.9); padding: 6px 8px; border-radius: 6px;"
+      >
         {{ selectedTiles.length }} selected
       </span>
     </div>
-
   </div>
 </template>
 
@@ -99,10 +108,21 @@ const REALTIME_PATH = '/rt/'
 const PRESENCE_PANE = 'ewrmPresence'
 const PRESENCE_REGION_SIZE = 128
 
-// add builder state
+const vehicle = reactive({
+  x: 0.5,
+  y: 0.5,
+  dir: [1, 0],
+  speed: 2.0,
+  initialized: false,
+  visible: false,
+})
+
+let lastVehicleTime = null
+let lastVehicleTile = { x: null, y: null }
+
 const builderMode = ref(false)
-const selectedTiles = ref([]) // ordered
-const selectedSet = new Set() // fast lookup
+const selectedTiles = ref([])
+const selectedSet = new Set()
 
 let socket = null
 let ownSocketId = null
@@ -181,7 +201,6 @@ function onRequestCover(_t) {
   flippedKey.value = null
 }
 
-// Anchor cache: key "x:y" (UI coords) -> anchor object {.., lastSeenMs}
 const anchorCache = new Map()
 let anchorPruneCounter = 0
 
@@ -195,7 +214,6 @@ const router = useRouter()
 
 const flippedKey = ref(null)
 
-// --- Tab registry ---
 const TAB_SETS = {
   song: [
     { id: 'cover', label: 'Cover' },
@@ -232,7 +250,6 @@ function tabsForTile(t) {
   return TAB_SETS[b] || TAB_SETS.default
 }
 
-// Persist selected tab per tile key ("x:y")
 const tabByKey = reactive(Object.create(null))
 
 function objectForTile(t) {
@@ -296,10 +313,8 @@ function onTabChange(t, tab) {
   }
 }
 
-// Keep the active anchor mounted even if it falls out of viewport anchor list
 const pinnedAnchor = ref(null)
 
-// Merge anchors + pinnedAnchor (dedupe by x:y)
 const renderAnchors = computed(() => {
   const out = []
   const seen = new Set()
@@ -321,11 +336,9 @@ const renderAnchors = computed(() => {
   return out
 })
 
-// 1024*1024 = 1,048,576 bytes (~1MB)
 const infraGrid = new Uint8Array(WORLD.cols * WORLD.rows)
 const infraCount = ref(0)
 
-// ACTIVE CELL payload
 const activeCell = ref(null)
 let cellAbort = null
 
@@ -360,19 +373,17 @@ function hash2D(x, y) {
 }
 
 function terrainBlend(x, y) {
-  const n =
+  return (
     Math.sin(x * 0.23) +
     Math.sin(y * 0.19) +
     Math.sin((x + y) * 0.11)
-
-  return n
+  )
 }
 
 function emptyTileKind(x, y) {
   const macro = macroTerrain(x, y)
   const band = terrainBand(x, y)
   const blend = terrainBlend(x, y)
-
   const h = (hash2D(x, y) + Math.floor(blend * 18)) % 100
 
   if (macro === 'mountain') {
@@ -423,37 +434,37 @@ function emptyTileKind(x, y) {
   return 'grass'
 }
 
-function drawEmptyLandscapeTile(ctx, x, y, px, py, cellPx) {
+function drawEmptyLandscapeTile(ctx2d, x, y, px, py, cellPx) {
   const kind = emptyTileKind(x, y)
 
   if (kind === 'grass') {
-    ctx.fillStyle = 'rgba(170, 186, 135, 0.32)'
-    ctx.fillRect(px, py, cellPx, cellPx)
-    ctx.strokeStyle = 'rgba(0,0,0,0.06)'
-    ctx.lineWidth = 1
-    ctx.strokeRect(px + 0.5, py + 0.5, cellPxScreen - 1, cellPxScreen - 1)
+    ctx2d.fillStyle = 'rgba(170, 186, 135, 0.32)'
+    ctx2d.fillRect(px, py, cellPx, cellPx)
+    ctx2d.strokeStyle = 'rgba(0,0,0,0.06)'
+    ctx2d.lineWidth = 1
+    ctx2d.strokeRect(px + 0.5, py + 0.5, cellPx - 1, cellPx - 1)
   } else if (kind === 'dirt') {
-    ctx.fillStyle = 'rgba(160, 136, 102, 0.28)'
-    ctx.fillRect(px, py, cellPx, cellPx)
+    ctx2d.fillStyle = 'rgba(160, 136, 102, 0.28)'
+    ctx2d.fillRect(px, py, cellPx, cellPx)
   } else if (kind === 'scrub') {
-    ctx.fillStyle = 'rgba(150, 165, 120, 0.24)'
-    ctx.fillRect(px, py, cellPx, cellPx)
+    ctx2d.fillStyle = 'rgba(150, 165, 120, 0.24)'
+    ctx2d.fillRect(px, py, cellPx, cellPx)
   } else if (kind === 'sand') {
-    ctx.fillStyle = 'rgba(196, 180, 126, 0.22)'
-    ctx.fillRect(px, py, cellPx, cellPx)
+    ctx2d.fillStyle = 'rgba(196, 180, 126, 0.22)'
+    ctx2d.fillRect(px, py, cellPx, cellPx)
   } else {
-    ctx.fillStyle = 'rgba(145, 145, 145, 0.16)'
-    ctx.fillRect(px, py, cellPx, cellPx)
+    ctx2d.fillStyle = 'rgba(145, 145, 145, 0.16)'
+    ctx2d.fillRect(px, py, cellPx, cellPx)
   }
 
   if (cellPx >= 40) {
     const h = hash2D(x, y)
     const count = 6 + (h % 8)
-    ctx.fillStyle = 'rgba(0,0,0,0.06)'
+    ctx2d.fillStyle = 'rgba(0,0,0,0.06)'
     for (let i = 0; i < count; i++) {
       const dx = ((h >> (i % 16)) % 1000) / 1000
       const dy = ((h >> ((i + 5) % 16)) % 1000) / 1000
-      ctx.fillRect(
+      ctx2d.fillRect(
         px + dx * (cellPx - 3),
         py + dy * (cellPx - 3),
         2,
@@ -503,37 +514,34 @@ function emptyTileLandmark(x, y) {
   return null
 }
 
-function drawEmptyLandmark(ctx, x, y, px, py, cellPx) {
+function drawEmptyLandmark(ctx2d, x, y, px, py, cellPx) {
   const kind = emptyTileLandmark(x, y)
-  if (!kind) return
-  if (cellPx < 28) return
+  if (!kind || cellPx < 28) return
 
   const cx = px + cellPx * 0.5
   const cy = py + cellPx * 0.5
 
   if (kind === 'pond') {
-    ctx.fillStyle = 'rgba(110, 150, 180, 0.32)'
-    ctx.beginPath()
-    ctx.ellipse(cx, cy, cellPx * 0.22, cellPx * 0.16, 0, 0, Math.PI * 2)
-    ctx.fill()
-
-    ctx.strokeStyle = 'rgba(70, 110, 140, 0.24)'
-    ctx.lineWidth = 1
-    ctx.stroke()
+    ctx2d.fillStyle = 'rgba(110, 150, 180, 0.32)'
+    ctx2d.beginPath()
+    ctx2d.ellipse(cx, cy, cellPx * 0.22, cellPx * 0.16, 0, 0, Math.PI * 2)
+    ctx2d.fill()
+    ctx2d.strokeStyle = 'rgba(70, 110, 140, 0.24)'
+    ctx2d.lineWidth = 1
+    ctx2d.stroke()
     return
   }
 
   if (kind === 'ruin') {
-    ctx.strokeStyle = 'rgba(90, 90, 90, 0.28)'
-    ctx.lineWidth = Math.max(1, cellPx * 0.03)
-    ctx.strokeRect(
+    ctx2d.strokeStyle = 'rgba(90, 90, 90, 0.28)'
+    ctx2d.lineWidth = Math.max(1, cellPx * 0.03)
+    ctx2d.strokeRect(
       px + cellPx * 0.28,
       py + cellPx * 0.28,
       cellPx * 0.44,
       cellPx * 0.44
     )
-
-    ctx.strokeRect(
+    ctx2d.strokeRect(
       px + cellPx * 0.38,
       py + cellPx * 0.38,
       cellPx * 0.10,
@@ -543,25 +551,25 @@ function drawEmptyLandmark(ctx, x, y, px, py, cellPx) {
   }
 
   if (kind === 'rocks') {
-    ctx.fillStyle = 'rgba(95, 95, 95, 0.24)'
+    ctx2d.fillStyle = 'rgba(95, 95, 95, 0.24)'
     for (let i = 0; i < 4; i++) {
       const ox = ((hash2D(x + i, y) % 100) / 100 - 0.5) * cellPx * 0.24
       const oy = ((hash2D(x, y + i) % 100) / 100 - 0.5) * cellPx * 0.24
-      ctx.beginPath()
-      ctx.arc(cx + ox, cy + oy, cellPx * 0.06, 0, Math.PI * 2)
-      ctx.fill()
+      ctx2d.beginPath()
+      ctx2d.arc(cx + ox, cy + oy, cellPx * 0.06, 0, Math.PI * 2)
+      ctx2d.fill()
     }
     return
   }
 
   if (kind === 'shrub') {
-    ctx.fillStyle = 'rgba(80, 120, 70, 0.26)'
+    ctx2d.fillStyle = 'rgba(80, 120, 70, 0.26)'
     for (let i = 0; i < 3; i++) {
       const ox = ((hash2D(x * 3 + i, y) % 100) / 100 - 0.5) * cellPx * 0.18
       const oy = ((hash2D(x, y * 3 + i) % 100) / 100 - 0.5) * cellPx * 0.18
-      ctx.beginPath()
-      ctx.arc(cx + ox, cy + oy, cellPx * 0.05, 0, Math.PI * 2)
-      ctx.fill()
+      ctx2d.beginPath()
+      ctx2d.arc(cx + ox, cy + oy, cellPx * 0.05, 0, Math.PI * 2)
+      ctx2d.fill()
     }
   }
 }
@@ -571,7 +579,7 @@ function isRoad(x, y) {
   return infraGrid[idxOf(x, y)] === ROLE.ROAD
 }
 
-function fillSmartRoundedRect(ctx, x, y, w, h, r, tx, ty) {
+function fillSmartRoundedRect(ctx2d, x, y, w, h, r, tx, ty) {
   const radius = Math.min(r, w / 2, h / 2)
 
   const top = isRoad(tx, ty - 1)
@@ -584,29 +592,24 @@ function fillSmartRoundedRect(ctx, x, y, w, h, r, tx, ty) {
   const bl = !(bottom || left)
   const br = !(bottom || right)
 
-  ctx.beginPath()
+  ctx2d.beginPath()
+  ctx2d.moveTo(x + (tl ? radius : 0), y)
+  ctx2d.lineTo(x + w - (tr ? radius : 0), y)
+  if (tr) ctx2d.quadraticCurveTo(x + w, y, x + w, y + radius)
 
-  ctx.moveTo(x + (tl ? radius : 0), y)
+  ctx2d.lineTo(x + w, y + h - (br ? radius : 0))
+  if (br) ctx2d.quadraticCurveTo(x + w, y + h, x + w - radius, y + h)
 
-  // top edge
-  ctx.lineTo(x + w - (tr ? radius : 0), y)
-  if (tr) ctx.quadraticCurveTo(x + w, y, x + w, y + radius)
+  ctx2d.lineTo(x + (bl ? radius : 0), y + h)
+  if (bl) ctx2d.quadraticCurveTo(x, y + h, x, y + h - radius)
 
-  // right edge
-  ctx.lineTo(x + w, y + h - (br ? radius : 0))
-  if (br) ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h)
+  ctx2d.lineTo(x, y + (tl ? radius : 0))
+  if (tl) ctx2d.quadraticCurveTo(x, y, x + radius, y)
 
-  // bottom
-  ctx.lineTo(x + (bl ? radius : 0), y + h)
-  if (bl) ctx.quadraticCurveTo(x, y + h, x, y + h - radius)
-
-  // left
-  ctx.lineTo(x, y + (tl ? radius : 0))
-  if (tl) ctx.quadraticCurveTo(x, y, x + radius, y)
-
-  ctx.closePath()
-  ctx.fill()
+  ctx2d.closePath()
+  ctx2d.fill()
 }
+
 /* ===== anchor cache helpers ===== */
 
 function anchorKey(x, yUi) {
@@ -646,6 +649,7 @@ function backendYToUiY(yBackend) {
   if (!BACKEND_Y_IS_BOTTOM_ORIGIN) return yBackend
   return (WORLD.rows - 1) - yBackend
 }
+
 function uiYToBackendY(yUi) {
   if (!BACKEND_Y_IS_BOTTOM_ORIGIN) return yUi
   return (WORLD.rows - 1) - yUi
@@ -675,11 +679,132 @@ function latLngToTileHit(latlng) {
 
   const x = clamp(Math.floor(rawX), 0, WORLD.cols - 1)
   const y = clamp(Math.floor(rawY), 0, WORLD.rows - 1)
-
   const ox = clamp(rawX - x, 0, 1)
   const oy = clamp(rawY - y, 0, 1)
 
   return { x, y, ox, oy }
+}
+
+/* ===== vehicle helpers ===== */
+
+function findNearestYBRToCenter() {
+  if (!map) return null
+
+  const center = latLngToTileXY(map.getCenter())
+  const maxRadius = 200
+
+  for (let r = 0; r <= maxRadius; r++) {
+    for (let y = center.y - r; y <= center.y + r; y++) {
+      for (let x = center.x - r; x <= center.x + r; x++) {
+        if (x < 0 || y < 0 || x >= WORLD.cols || y >= WORLD.rows) continue
+        if (infraGrid[idxOf(x, y)] === ROLE.YBR) {
+          return { x, y }
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+function isYBR(x, y) {
+  if (x < 0 || y < 0 || x >= WORLD.cols || y >= WORLD.rows) return false
+  return infraGrid[idxOf(x, y)] === ROLE.YBR
+}
+
+function getYBRNeighbors(x, y) {
+  const n = []
+
+  if (isYBR(x + 1, y)) n.push([x + 1, y])
+  if (isYBR(x - 1, y)) n.push([x - 1, y])
+  if (isYBR(x, y + 1)) n.push([x, y + 1])
+  if (isYBR(x, y - 1)) n.push([x, y - 1])
+
+  return n
+}
+
+function initVehicleIfNeeded() {
+  if (vehicle.initialized || infraCount.value === 0) return
+
+  const start = findNearestYBRToCenter()
+  if (!start) return
+
+  vehicle.x = start.x + 0.5
+  vehicle.y = start.y + 0.5
+  vehicle.dir = [1, 0]
+  vehicle.initialized = true
+  vehicle.visible = true
+  lastVehicleTile = { x: Math.floor(vehicle.x), y: Math.floor(vehicle.y) }
+  lastVehicleTime = null
+}
+
+function updateVehicle() {
+  if (infraCount.value === 0) return
+  if (!vehicle.initialized) initVehicleIfNeeded()
+  if (!vehicle.initialized) return
+
+  const now = performance.now()
+
+  if (lastVehicleTime == null) {
+    lastVehicleTime = now
+    return
+  }
+
+  const dt = Math.min((now - lastVehicleTime) / 1000, 0.1)
+  lastVehicleTime = now
+
+  const dx = vehicle.dir[0] * vehicle.speed * dt
+  const dy = vehicle.dir[1] * vehicle.speed * dt
+
+  vehicle.x += dx
+  vehicle.y += dy
+
+  handleVehicleTileTransition()
+}
+
+function handleVehicleTileTransition() {
+  const tx = Math.floor(vehicle.x)
+  const ty = Math.floor(vehicle.y)
+
+  if (tx === lastVehicleTile.x && ty === lastVehicleTile.y) return
+  lastVehicleTile = { x: tx, y: ty }
+
+  const neighbors = getYBRNeighbors(tx, ty)
+
+  if (!neighbors.length) {
+    vehicle.x = tx + 0.5
+    vehicle.y = ty + 0.5
+    vehicle.dir = [0, 0]
+    return
+  }
+
+  const reverseX = -vehicle.dir[0]
+  const reverseY = -vehicle.dir[1]
+
+  const forward = neighbors.filter(([nx, ny]) => {
+    const dx = nx - tx
+    const dy = ny - ty
+    return !(dx === reverseX && dy === reverseY)
+  })
+
+  const options = forward.length ? forward : neighbors
+
+  const scored = options.map(([nx, ny]) => {
+    const dx = nx - tx
+    const dy = ny - ty
+    const score = (dx * vehicle.dir[0]) + (dy * vehicle.dir[1])
+    return { nx, ny, score }
+  })
+
+  scored.sort((a, b) => b.score - a.score)
+
+  const bestScore = scored[0]?.score ?? 0
+  const bestOptions = scored.filter(item => item.score === bestScore)
+  const pick = bestOptions[Math.floor(Math.random() * bestOptions.length)]
+
+  if (!pick) return
+
+  vehicle.dir = [pick.nx - tx, pick.ny - ty]
 }
 
 /* ===== infra helpers ===== */
@@ -953,7 +1078,7 @@ function makeGravelPattern() {
     const y = Math.random() * c.height
     const w = Math.random() * 2.2 + 0.6
     const h = Math.random() * 1.6 + 0.4
-    const a = (Math.random() * Math.PI)
+    const a = Math.random() * Math.PI
     const alpha = Math.random() * 0.18 + 0.04
     chip(x, y, w, h, a, `rgba(55,55,55,${alpha})`)
   }
@@ -963,7 +1088,7 @@ function makeGravelPattern() {
     const y = Math.random() * c.height
     const w = Math.random() * 2.6 + 0.8
     const h = Math.random() * 1.9 + 0.5
-    const a = (Math.random() * Math.PI)
+    const a = Math.random() * Math.PI
     const alpha = Math.random() * 0.12 + 0.03
     chip(x, y, w, h, a, `rgba(235,235,235,${alpha})`)
   }
@@ -973,7 +1098,7 @@ function makeGravelPattern() {
     const y = Math.random() * c.height
     const w = Math.random() * 5.5 + 2.0
     const h = Math.random() * 3.5 + 1.5
-    const a = (Math.random() * Math.PI)
+    const a = Math.random() * Math.PI
     const alpha = Math.random() * 0.10 + 0.03
     chip(x, y, w, h, a, `rgba(80,80,80,${alpha})`)
   }
@@ -1039,11 +1164,9 @@ function makeGrassPattern() {
   c.height = 128
   const g = c.getContext('2d')
 
-  // base
   g.fillStyle = 'rgba(80, 140, 70, 0.9)'
   g.fillRect(0, 0, c.width, c.height)
 
-  // blades / variation
   for (let i = 0; i < 1500; i++) {
     const x = Math.random() * c.width
     const y = Math.random() * c.height
@@ -1054,6 +1177,7 @@ function makeGrassPattern() {
 
   return g.createPattern(c, 'repeat')
 }
+
 /* ===== anchors ===== */
 
 function tileStyle(t) {
@@ -1273,6 +1397,8 @@ async function refreshInfraMoveEnd() {
     hud.err = String(err?.message || err)
     console.error(err)
   }
+
+  initVehicleIfNeeded()
 }
 
 /* ===== active cell ===== */
@@ -1503,7 +1629,6 @@ function drawGrid() {
           ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
         }
 
-        // subtle edge
         ctx.strokeStyle = 'rgba(0,0,0,0.06)'
         ctx.lineWidth = 1
         ctx.strokeRect(px + 0.5, py + 0.5, cellPxScreen - 1, cellPxScreen - 1)
@@ -1536,12 +1661,17 @@ function drawGrid() {
 
 function scheduleFrame() {
   if (raf) return
+
   raf = requestAnimationFrame(() => {
     raf = 0
+
     updateCellPxLayer()
     updateAnchorCameraLayer()
+    updateVehicle()
     drawGrid()
     updateHud()
+
+    scheduleFrame()
   })
 }
 
@@ -1677,8 +1807,7 @@ function markerLatLngForTile(x, y, ox = 0.5, oy = 0.5) {
 }
 
 function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5, avatarUrl = null }) {
-  if (!map) return
-  if (!id) return
+  if (!map || !id) return
   if (!Number.isFinite(x) || !Number.isFinite(y)) return
 
   ensurePresencePane()
@@ -1726,7 +1855,6 @@ function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5, avatarUrl = null }
 
   const prev = marker.getLatLng()
   const moved = !prev || prev.lat !== ll.lat || prev.lng !== ll.lng
-
   if (!moved) return
 
   marker.setLatLng(ll)
@@ -1741,11 +1869,9 @@ function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5, avatarUrl = null }
       img.src = finalAvatarUrl
     }
 
-    if (moved) {
-      el.classList.remove('arrival-pulse')
-      void el.offsetWidth
-      el.classList.add('arrival-pulse')
-    }
+    el.classList.remove('arrival-pulse')
+    void el.offsetWidth
+    el.classList.add('arrival-pulse')
   }
 }
 
@@ -2023,7 +2149,6 @@ onMounted(async () => {
   })
 
   map.on('move', () => {
-    scheduleFrame()
     requestInfraWhileMoving()
   })
 
@@ -2041,7 +2166,6 @@ onMounted(async () => {
     } finally {
       isMoving = false
       refreshPresenceForViewport()
-      scheduleFrame()
     }
   })
 
@@ -2072,10 +2196,7 @@ onMounted(async () => {
     }
 
     if (clickedAnchor) return
-
-    if (flippedKey.value) {
-      return
-    }
+    if (flippedKey.value) return
 
     const { x, y, ox, oy } = latLngToTileHit(e.latlng)
 
@@ -2088,8 +2209,8 @@ onMounted(async () => {
   requestAnimationFrame(() => {
     map.invalidateSize({ pan: false })
     updateCellPxLayer()
-    scheduleFrame()
     handleRoutePipeline().catch(console.error)
+    scheduleFrame()
   })
 })
 
@@ -2122,6 +2243,24 @@ onBeforeUnmount(() => {
   map = null
 
   anchorCache.clear()
+})
+
+const vehicleStyle = computed(() => {
+  const cell = _cellPxLayer
+  const px = camL.px0 + (vehicle.x - camL.xmin) * cell
+  const py = camL.py0 + (vehicle.y - camL.ymin) * cell
+
+  const size = cell * 0.9
+  const angle = Math.atan2(vehicle.dir[1], vehicle.dir[0]) * 180 / Math.PI
+
+  return {
+    transform: `
+      translate3d(${Math.round(px - size / 2)}px, ${Math.round(py - size / 2)}px, 0)
+      rotate(${angle}deg)
+    `,
+    width: `${size}px`,
+    height: `${size}px`,
+  }
 })
 </script>
 
@@ -2186,4 +2325,14 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.vehicle {
+  position: absolute;
+  background: red;
+  border-radius: 50%;
+  z-index: 200;
+  pointer-events: none;
+  transform-origin: center center;
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.85);
+  opacity: 1;
+}
 </style>
