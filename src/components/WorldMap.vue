@@ -448,22 +448,27 @@ function drawEmptyLandscapeTile(ctx2d, x, y, px, py, cellPx) {
   const kind = emptyTileKind(x, y)
 
   if (kind === 'grass') {
-    ctx2d.fillStyle = 'rgba(58, 78, 60, 0.60)'
+    ctx2d.fillStyle = 'rgba(38, 54, 42, 0.70)' // deep moss
     ctx2d.fillRect(px, py, cellPx, cellPx)
-    ctx2d.strokeStyle = 'rgba(255,255,255,0.04)'
+
+    ctx2d.strokeStyle = 'rgba(255,255,255,0.035)'
     ctx2d.lineWidth = 1
     ctx2d.strokeRect(px + 0.5, py + 0.5, cellPx - 1, cellPx - 1)
+
   } else if (kind === 'dirt') {
-    ctx2d.fillStyle = 'rgba(78, 64, 52, 0.58)'
+    ctx2d.fillStyle = 'rgba(64, 50, 42, 0.66)' // muted earth
     ctx2d.fillRect(px, py, cellPx, cellPx)
+
   } else if (kind === 'scrub') {
-    ctx2d.fillStyle = 'rgba(70, 76, 56, 0.56)'
+    ctx2d.fillStyle = 'rgba(52, 60, 44, 0.64)' // olive dusk
     ctx2d.fillRect(px, py, cellPx, cellPx)
+
   } else if (kind === 'sand') {
-    ctx2d.fillStyle = 'rgba(92, 84, 60, 0.52)'
+    ctx2d.fillStyle = 'rgba(86, 78, 56, 0.60)' // desaturated sand
     ctx2d.fillRect(px, py, cellPx, cellPx)
+
   } else {
-    ctx2d.fillStyle = 'rgba(62, 66, 74, 0.52)'
+    ctx2d.fillStyle = 'rgba(44, 48, 54, 0.62)' // stone / slate
     ctx2d.fillRect(px, py, cellPx, cellPx)
   }
 
@@ -532,18 +537,18 @@ function drawEmptyLandmark(ctx2d, x, y, px, py, cellPx) {
   const cy = py + cellPx * 0.5
 
   if (kind === 'pond') {
-    ctx2d.fillStyle = 'rgba(110, 150, 180, 0.32)'
+    ctx2d.fillStyle = 'rgba(70, 95, 120, 0.35)'
+    ctx2d.strokeStyle = 'rgba(120, 150, 180, 0.25)'
     ctx2d.beginPath()
     ctx2d.ellipse(cx, cy, cellPx * 0.22, cellPx * 0.16, 0, 0, Math.PI * 2)
     ctx2d.fill()
-    ctx2d.strokeStyle = 'rgba(70, 110, 140, 0.24)'
     ctx2d.lineWidth = 1
     ctx2d.stroke()
     return
   }
 
   if (kind === 'ruin') {
-    ctx2d.strokeStyle = 'rgba(90, 90, 90, 0.28)'
+    ctx2d.strokeStyle = 'rgba(110,110,110,0.25)'
     ctx2d.lineWidth = Math.max(1, cellPx * 0.03)
     ctx2d.strokeRect(
       px + cellPx * 0.28,
@@ -561,7 +566,7 @@ function drawEmptyLandmark(ctx2d, x, y, px, py, cellPx) {
   }
 
   if (kind === 'rocks') {
-    ctx2d.fillStyle = 'rgba(95, 95, 95, 0.24)'
+    ctx2d.fillStyle = 'rgba(85,85,90,0.28)'
     for (let i = 0; i < 4; i++) {
       const ox = ((hash2D(x + i, y) % 100) / 100 - 0.5) * cellPx * 0.24
       const oy = ((hash2D(x, y + i) % 100) / 100 - 0.5) * cellPx * 0.24
@@ -573,7 +578,7 @@ function drawEmptyLandmark(ctx2d, x, y, px, py, cellPx) {
   }
 
   if (kind === 'shrub') {
-    ctx2d.fillStyle = 'rgba(80, 120, 70, 0.26)'
+    ctx2d.fillStyle = 'rgba(60, 100, 70, 0.30)'
     for (let i = 0; i < 3; i++) {
       const ox = ((hash2D(x * 3 + i, y) % 100) / 100 - 0.5) * cellPx * 0.18
       const oy = ((hash2D(x, y * 3 + i) % 100) / 100 - 0.5) * cellPx * 0.18
@@ -1102,14 +1107,14 @@ function makeGrassPattern() {
   c.height = 128
   const g = c.getContext('2d')
 
-  g.fillStyle = 'rgba(80, 140, 70, 0.9)'
+  g.fillStyle = 'rgba(36, 68, 48, 0.9)'
   g.fillRect(0, 0, c.width, c.height)
 
   for (let i = 0; i < 1500; i++) {
     const x = Math.random() * c.width
     const y = Math.random() * c.height
     const h = Math.random() * 4 + 2
-    g.fillStyle = `rgba(40, ${100 + Math.random() * 80}, 40, 0.2)`
+    g.fillStyle = `rgba(60, ${100 + Math.random() * 60}, 60, 0.22)`
     g.fillRect(x, y, 1, h)
   }
 
@@ -1547,17 +1552,22 @@ function drawGrid() {
       }
 
       if (role === ROLE.YBR) {
-        ctx.fillStyle = 'rgba(244, 197, 66, 0.70)'
+        // base glow
+        ctx.fillStyle = 'rgba(210, 170, 40, 0.55)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+
+        // soft bloom (important)
+        ctx.fillStyle = 'rgba(255, 210, 90, 0.12)'
+        ctx.fillRect(px - 2, py - 2, cellPxScreen + 4, cellPxScreen + 4)
 
         if (useTextures && brickPattern) {
           ctx.fillStyle = brickPattern
-          ctx.globalAlpha = 0.95
+          ctx.globalAlpha = 0.85
           ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
           ctx.globalAlpha = 1
         }
       } else if (role === ROLE.ROAD) {
-        ctx.fillStyle = 'rgba(80, 140, 70, 0.9)'
+        ctx.fillStyle = 'rgba(46, 84, 58, 0.85)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
 
         if (useTextures && grassPattern) {
@@ -2217,7 +2227,7 @@ const vehicleStyle = computed(() => {
 <style scoped>
 .wrap { position: relative; width: 100vw; height: 100vh; }
 .map { width: 100%; height: 100%; }
-:deep(.leaflet-container) { background: #1b1d20; }
+:deep(.leaflet-container) { background: #141618; }
 
 .grid-canvas {
   position: absolute;
@@ -2284,9 +2294,9 @@ const vehicleStyle = computed(() => {
 
   background: linear-gradient(
     to bottom,
-    #e14b4b 0%,
-    #cf2f2f 58%,
-    #a91f1f 100%
+    #ff6a6a 0%,
+    #d63a3a 60%,
+    #9f1e1e 100%
   );
   border-radius: 12px;
   border: 2px solid rgba(40, 20, 20, 0.45);
