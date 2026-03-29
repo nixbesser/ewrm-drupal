@@ -26,9 +26,15 @@
           :tab="tabFor(t)"
           :tabs="tabsForTile(t)"
           @tab-change="onTabChange(t, $event)"
-          @request-cover="flippedKey = null"
+          @request-cover="onRequestCover(t)"
         />
       </div>
+
+      <div
+        v-if="vehicle.visible && !followVehicle"
+        class="vehicle"
+        :style="vehicleStyle"
+      ></div>
     </div>
 
     <div class="hud">
@@ -43,7 +49,44 @@
       <div>infra(nonzero): {{ infraCount }}</div>
       <div>activeCell: {{ activeCell ? 'yes' : 'no' }}</div>
       <div>users: {{ presenceCount }}</div>
+      <div>vehicle: {{ vehicle.visible ? 'yes' : 'no' }}</div>
     </div>
+
+    <div class="builder-ui">
+      <button @click="builderMode = !builderMode">
+        {{ builderMode ? 'Exit Builder' : 'Road Builder' }}
+      </button>
+
+      <button v-if="builderMode" @click="exportCSV">
+        Export CSV
+      </button>
+
+      <button v-if="builderMode" @click="clearSelection">
+        Clear
+      </button>
+
+      <button @click="centerOnVehicle">
+        Center on Bus
+      </button>
+
+      <button @click="toggleRideMode">
+        {{ followVehicle ? 'Stop Ride' : 'Ride Bus' }}
+      </button>
+
+      <span
+        v-if="builderMode"
+        style="background: rgba(255,255,255,0.9); padding: 6px 8px; border-radius: 6px;"
+      >
+        {{ selectedTiles.length }} selected
+      </span>
+    </div>
+
+    <div
+      v-if="vehicle.visible && followVehicle"
+      class="ride-bus-overlay"
+      :style="rideBusOverlayStyle"
+    ></div>
+
   </div>
 </template>
 
@@ -52,30 +95,25 @@ import L from 'leaflet'
 import { io } from 'socket.io-client'
 import { ref, onMounted, onBeforeUnmount, watch, reactive, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { fetchViewport, fetchCell, resolveObject } from '../api/worldApi'
+
+import { fetchViewport, fetchCell, resolveObject, fetchInfra } from '../api/worldApi'
 import TileAnchor from './TileAnchor.vue'
 
-/**
- * BEST UX SETTINGS
- * - Render on every move via RAF (drag + inertia)
- * - Fetch infra progressively while moving (throttled + deduped)
- */
+import selfAvatar from '../assets/self-avatar.png'
+import otherAvatar from '../assets/other-avatar.png'
+
 const WORLD = { z: 10, cols: 1024, rows: 1024, cellPx: 256 }
 const BACKEND_Y_IS_BOTTOM_ORIGIN = false
 
-// Fetch radii (pads):
 const PAD_ANCHORS = 12
-const PAD_INFRA_MOVE = 16   // prefetch while moving
-const PAD_INFRA_END = 24    // bigger prefetch on moveend
+const PAD_INFRA_MOVE = 16
+const PAD_INFRA_END = 24
 const PAD_DRAW = 2
 
-// Move fetch throttle (ms)
 const INFRA_MOVE_THROTTLE_MS = 250
 
-// Role encoding (1 byte per tile)
 const ROLE = { NONE: 0, ROAD: 1, YBR: 2, PLAZA: 3 }
 
-// Anchor cache hygiene (future-proof)
 const ANCHOR_CACHE_MAX = 8000
 const ANCHOR_CACHE_TTL_MS = 30 * 60 * 1000
 const ANCHOR_CACHE_PRUNE_EVERY = 25
@@ -83,33 +121,41 @@ const anchorCacheSize = ref(0)
 
 const REALTIME_PATH = '/rt/'
 const PRESENCE_PANE = 'ewrmPresence'
-const PRESENCE_RADIUS = 18
 const PRESENCE_REGION_SIZE = 128
 
-const PRESENCE_STYLE_SELF = {
-  pane: PRESENCE_PANE,
-  radius: PRESENCE_RADIUS,
-  color: '#111111',
-  fillColor: '#ff5a36',
-  fillOpacity: 0.95,
-  weight: 1,
-  opacity: 1,
-}
+const followVehicle = ref(false)
 
-const PRESENCE_STYLE_OTHER = {
-  pane: PRESENCE_PANE,
-  radius: PRESENCE_RADIUS,
-  color: '#111111',
-  fillColor: '#00b7ff',
-  fillOpacity: 0.9,
-  weight: 1,
-  opacity: 1,
-}
+const vehicle = reactive({
+  x: 0.5,
+  y: 0.5,
+  dir: [1, 0],
+  speed: 0,
+  visible: false,
+})
+
+const vehicleTarget = reactive({
+  x: 0.5,
+  y: 0.5,
+  dir: [1, 0],
+  speed: 0,
+  visible: false,
+})
+
+const VEHICLE_LERP = 0.18
+
+let lastVehicleRenderMs = 0
+
+const builderMode = ref(false)
+const selectedTiles = ref([])
+const selectedSet = new Set()
+
+let lastRidePanMs = 0
+const RIDE_PAN_INTERVAL_MS = 80
 
 let socket = null
 let ownSocketId = null
 let lastViewportRegions = []
-const presenceMarkers = new Map() // socketId -> L.circleMarker
+const presenceMarkers = new Map()
 const presenceCount = ref(0)
 
 const selfPresence = reactive({
@@ -125,7 +171,64 @@ const anchorLayerEl = ref(null)
 
 const anchors = ref([])
 
-// Anchor cache: key "x:y" (UI coords) -> anchor object {.., lastSeenMs}
+const MAX_PRELOADED_COVERS = 400
+const preloadedCovers = new Map()
+const coverPreloadQueue = new Map()
+
+function preloadCover(url) {
+  if (!url) return Promise.resolve()
+
+  if (preloadedCovers.has(url)) {
+    const v = preloadedCovers.get(url)
+    preloadedCovers.delete(url)
+    preloadedCovers.set(url, v)
+    return Promise.resolve()
+  }
+
+  if (coverPreloadQueue.has(url)) {
+    return coverPreloadQueue.get(url)
+  }
+
+  const p = new Promise((resolve) => {
+    const img = new Image()
+    img.decoding = 'async'
+
+    img.onload = async () => {
+      try { await img.decode?.() } catch (_) {}
+
+      preloadedCovers.set(url, true)
+
+      if (preloadedCovers.size > MAX_PRELOADED_COVERS) {
+        const oldest = preloadedCovers.keys().next().value
+        if (oldest) preloadedCovers.delete(oldest)
+      }
+
+      coverPreloadQueue.delete(url)
+      resolve()
+    }
+
+    img.onerror = () => {
+      coverPreloadQueue.delete(url)
+      resolve()
+    }
+
+    img.src = url
+  })
+
+  coverPreloadQueue.set(url, p)
+  return p
+}
+
+function preloadAnchorCovers(list) {
+  for (const a of list || []) {
+    if (a?.cover) preloadCover(a.cover)
+  }
+}
+
+function onRequestCover(_t) {
+  flippedKey.value = null
+}
+
 const anchorCache = new Map()
 let anchorPruneCounter = 0
 
@@ -139,7 +242,6 @@ const router = useRouter()
 
 const flippedKey = ref(null)
 
-// --- Tab registry (easy to extend) ---
 const TAB_SETS = {
   song: [
     { id: 'cover', label: 'Cover' },
@@ -154,8 +256,20 @@ const TAB_SETS = {
   ],
 }
 
+function keyForTile(t) {
+  return `${t.x}:${t.y}`
+}
+
+function activeCellMatchesTile(t) {
+  const a = activeCell.value?.anchor
+  if (!a || !t) return false
+  return Number(a.x) === Number(t.x) && Number(a.y) === Number(t.y)
+}
+
 function bundleForTile(t) {
-  if (isActive(t) && activeCell.value?.object?.bundle) return activeCell.value.object.bundle
+  if (activeCellMatchesTile(t) && activeCell.value?.object?.bundle) {
+    return activeCell.value.object.bundle
+  }
   return t?.object?.bundle || 'default'
 }
 
@@ -164,25 +278,71 @@ function tabsForTile(t) {
   return TAB_SETS[b] || TAB_SETS.default
 }
 
-// Persist selected tab per tile key ("x:y")
 const tabByKey = reactive(Object.create(null))
-function keyForTile(t) { return `${t.x}:${t.y}` }
+
+function objectForTile(t) {
+  if (activeCellMatchesTile(t) && activeCell.value?.object) {
+    return activeCell.value.object
+  }
+  return t?.object || null
+}
+
+function isTabOpenableForObject(obj, tabs, tabId) {
+  const ids = tabs.map(tab => tab.id)
+  if (!ids.includes(tabId)) return false
+  if (tabId === 'cover') return false
+
+  if (tabId === 'embed') {
+    return typeof obj?.embed_url === 'string' && obj.embed_url.trim().startsWith('http')
+  }
+
+  if (tabId === 'description') {
+    return typeof obj?.description === 'string' && obj.description.trim().length > 0
+  }
+
+  if (tabId === 'links') {
+    return Array.isArray(obj?.links) && obj.links.length > 0
+  }
+
+  return true
+}
+
+function firstOpenableTabForTile(t) {
+  const tabs = tabsForTile(t)
+  const obj = objectForTile(t)
+
+  for (const tab of tabs) {
+    if (tab.id === 'cover') continue
+    if (isTabOpenableForObject(obj, tabs, tab.id)) return tab.id
+  }
+
+  return 'cover'
+}
 
 function tabFor(t) {
   const key = keyForTile(t)
-  const tabs = tabsForTile(t)
-  return tabByKey[key] || tabs[0].id
+  const remembered = tabByKey[key]
+
+  if (remembered && isTabOpenableForObject(objectForTile(t), tabsForTile(t), remembered)) {
+    return remembered
+  }
+
+  return firstOpenableTabForTile(t)
 }
 
 function onTabChange(t, tab) {
   if (tab === 'cover') return
-  tabByKey[keyForTile(t)] = tab
+
+  const obj = objectForTile(t)
+  const tabs = tabsForTile(t)
+
+  if (isTabOpenableForObject(obj, tabs, tab)) {
+    tabByKey[keyForTile(t)] = tab
+  }
 }
 
-// Keep the active anchor mounted even if it falls out of viewport anchor list
 const pinnedAnchor = ref(null)
 
-// Merge anchors + pinnedAnchor (dedupe by x:y)
 const renderAnchors = computed(() => {
   const out = []
   const seen = new Set()
@@ -204,11 +364,9 @@ const renderAnchors = computed(() => {
   return out
 })
 
-// 1024*1024 = 1,048,576 bytes (~1MB)
 const infraGrid = new Uint8Array(WORLD.cols * WORLD.rows)
 const infraCount = ref(0)
 
-// ACTIVE CELL payload
 const activeCell = ref(null)
 let cellAbort = null
 
@@ -243,19 +401,17 @@ function hash2D(x, y) {
 }
 
 function terrainBlend(x, y) {
-  const n =
+  return (
     Math.sin(x * 0.23) +
     Math.sin(y * 0.19) +
     Math.sin((x + y) * 0.11)
-
-  return n
+  )
 }
 
 function emptyTileKind(x, y) {
   const macro = macroTerrain(x, y)
   const band = terrainBand(x, y)
   const blend = terrainBlend(x, y)
-
   const h = (hash2D(x, y) + Math.floor(blend * 18)) % 100
 
   if (macro === 'mountain') {
@@ -306,34 +462,42 @@ function emptyTileKind(x, y) {
   return 'grass'
 }
 
-function drawEmptyLandscapeTile(ctx, x, y, px, py, cellPx) {
+function drawEmptyLandscapeTile(ctx2d, x, y, px, py, cellPx) {
   const kind = emptyTileKind(x, y)
 
   if (kind === 'grass') {
-    ctx.fillStyle = 'rgba(170, 186, 135, 0.32)'
-    ctx.fillRect(px, py, cellPx, cellPx)
+    ctx2d.fillStyle = 'rgba(38, 54, 42, 0.70)' // deep moss
+    ctx2d.fillRect(px, py, cellPx, cellPx)
+
+    ctx2d.strokeStyle = 'rgba(255,255,255,0.035)'
+    ctx2d.lineWidth = 1
+    ctx2d.strokeRect(px + 0.5, py + 0.5, cellPx - 1, cellPx - 1)
+
   } else if (kind === 'dirt') {
-    ctx.fillStyle = 'rgba(160, 136, 102, 0.28)'
-    ctx.fillRect(px, py, cellPx, cellPx)
+    ctx2d.fillStyle = 'rgba(64, 50, 42, 0.66)' // muted earth
+    ctx2d.fillRect(px, py, cellPx, cellPx)
+
   } else if (kind === 'scrub') {
-    ctx.fillStyle = 'rgba(150, 165, 120, 0.24)'
-    ctx.fillRect(px, py, cellPx, cellPx)
+    ctx2d.fillStyle = 'rgba(52, 60, 44, 0.64)' // olive dusk
+    ctx2d.fillRect(px, py, cellPx, cellPx)
+
   } else if (kind === 'sand') {
-    ctx.fillStyle = 'rgba(196, 180, 126, 0.22)'
-    ctx.fillRect(px, py, cellPx, cellPx)
+    ctx2d.fillStyle = 'rgba(86, 78, 56, 0.60)' // desaturated sand
+    ctx2d.fillRect(px, py, cellPx, cellPx)
+
   } else {
-    ctx.fillStyle = 'rgba(145, 145, 145, 0.16)'
-    ctx.fillRect(px, py, cellPx, cellPx)
+    ctx2d.fillStyle = 'rgba(44, 48, 54, 0.62)' // stone / slate
+    ctx2d.fillRect(px, py, cellPx, cellPx)
   }
 
   if (cellPx >= 40) {
     const h = hash2D(x, y)
     const count = 6 + (h % 8)
-    ctx.fillStyle = 'rgba(0,0,0,0.06)'
+    ctx2d.fillStyle = 'rgba(0,0,0,0.06)'
     for (let i = 0; i < count; i++) {
       const dx = ((h >> (i % 16)) % 1000) / 1000
       const dy = ((h >> ((i + 5) % 16)) % 1000) / 1000
-      ctx.fillRect(
+      ctx2d.fillRect(
         px + dx * (cellPx - 3),
         py + dy * (cellPx - 3),
         2,
@@ -383,37 +547,34 @@ function emptyTileLandmark(x, y) {
   return null
 }
 
-function drawEmptyLandmark(ctx, x, y, px, py, cellPx) {
+function drawEmptyLandmark(ctx2d, x, y, px, py, cellPx) {
   const kind = emptyTileLandmark(x, y)
-  if (!kind) return
-  if (cellPx < 28) return
+  if (!kind || cellPx < 28) return
 
   const cx = px + cellPx * 0.5
   const cy = py + cellPx * 0.5
 
   if (kind === 'pond') {
-    ctx.fillStyle = 'rgba(110, 150, 180, 0.32)'
-    ctx.beginPath()
-    ctx.ellipse(cx, cy, cellPx * 0.22, cellPx * 0.16, 0, 0, Math.PI * 2)
-    ctx.fill()
-
-    ctx.strokeStyle = 'rgba(70, 110, 140, 0.24)'
-    ctx.lineWidth = 1
-    ctx.stroke()
+    ctx2d.fillStyle = 'rgba(70, 95, 120, 0.35)'
+    ctx2d.strokeStyle = 'rgba(120, 150, 180, 0.25)'
+    ctx2d.beginPath()
+    ctx2d.ellipse(cx, cy, cellPx * 0.22, cellPx * 0.16, 0, 0, Math.PI * 2)
+    ctx2d.fill()
+    ctx2d.lineWidth = 1
+    ctx2d.stroke()
     return
   }
 
   if (kind === 'ruin') {
-    ctx.strokeStyle = 'rgba(90, 90, 90, 0.28)'
-    ctx.lineWidth = Math.max(1, cellPx * 0.03)
-    ctx.strokeRect(
+    ctx2d.strokeStyle = 'rgba(110,110,110,0.25)'
+    ctx2d.lineWidth = Math.max(1, cellPx * 0.03)
+    ctx2d.strokeRect(
       px + cellPx * 0.28,
       py + cellPx * 0.28,
       cellPx * 0.44,
       cellPx * 0.44
     )
-
-    ctx.strokeRect(
+    ctx2d.strokeRect(
       px + cellPx * 0.38,
       py + cellPx * 0.38,
       cellPx * 0.10,
@@ -423,30 +584,76 @@ function drawEmptyLandmark(ctx, x, y, px, py, cellPx) {
   }
 
   if (kind === 'rocks') {
-    ctx.fillStyle = 'rgba(95, 95, 95, 0.24)'
+    ctx2d.fillStyle = 'rgba(85,85,90,0.28)'
     for (let i = 0; i < 4; i++) {
       const ox = ((hash2D(x + i, y) % 100) / 100 - 0.5) * cellPx * 0.24
       const oy = ((hash2D(x, y + i) % 100) / 100 - 0.5) * cellPx * 0.24
-      ctx.beginPath()
-      ctx.arc(cx + ox, cy + oy, cellPx * 0.06, 0, Math.PI * 2)
-      ctx.fill()
+      ctx2d.beginPath()
+      ctx2d.arc(cx + ox, cy + oy, cellPx * 0.06, 0, Math.PI * 2)
+      ctx2d.fill()
     }
     return
   }
 
   if (kind === 'shrub') {
-    ctx.fillStyle = 'rgba(80, 120, 70, 0.26)'
+    ctx2d.fillStyle = 'rgba(60, 100, 70, 0.30)'
     for (let i = 0; i < 3; i++) {
       const ox = ((hash2D(x * 3 + i, y) % 100) / 100 - 0.5) * cellPx * 0.18
       const oy = ((hash2D(x, y * 3 + i) % 100) / 100 - 0.5) * cellPx * 0.18
-      ctx.beginPath()
-      ctx.arc(cx + ox, cy + oy, cellPx * 0.05, 0, Math.PI * 2)
-      ctx.fill()
+      ctx2d.beginPath()
+      ctx2d.arc(cx + ox, cy + oy, cellPx * 0.05, 0, Math.PI * 2)
+      ctx2d.fill()
     }
   }
 }
 
-/* ===== anchor cache helpers (LRU + TTL) ===== */
+function isRoad(x, y) {
+  if (x < 0 || y < 0 || x >= WORLD.cols || y >= WORLD.rows) return false
+  return infraGrid[idxOf(x, y)] === ROLE.ROAD
+}
+
+function fillSmartRoundedRect(ctx2d, x, y, w, h, r, tx, ty) {
+  const radius = Math.min(r, w / 2, h / 2)
+
+  const top = isRoad(tx, ty - 1)
+  const bottom = isRoad(tx, ty + 1)
+  const left = isRoad(tx - 1, ty)
+  const right = isRoad(tx + 1, ty)
+
+  const tl = !(top || left)
+  const tr = !(top || right)
+  const bl = !(bottom || left)
+  const br = !(bottom || right)
+
+  ctx2d.beginPath()
+  ctx2d.moveTo(x + (tl ? radius : 0), y)
+  ctx2d.lineTo(x + w - (tr ? radius : 0), y)
+  if (tr) ctx2d.quadraticCurveTo(x + w, y, x + w, y + radius)
+
+  ctx2d.lineTo(x + w, y + h - (br ? radius : 0))
+  if (br) ctx2d.quadraticCurveTo(x + w, y + h, x + w - radius, y + h)
+
+  ctx2d.lineTo(x + (bl ? radius : 0), y + h)
+  if (bl) ctx2d.quadraticCurveTo(x, y + h, x, y + h - radius)
+
+  ctx2d.lineTo(x, y + (tl ? radius : 0))
+  if (tl) ctx2d.quadraticCurveTo(x, y, x + radius, y)
+
+  ctx2d.closePath()
+  ctx2d.fill()
+}
+
+function syncRideModeDragState() {
+  if (!map) return
+
+  if (followVehicle.value) {
+    map.dragging.disable()
+  } else {
+    map.dragging.disable()
+  }
+}
+
+/* ===== anchor cache helpers ===== */
 
 function anchorKey(x, yUi) {
   return `${x}:${yUi}`
@@ -485,12 +692,13 @@ function backendYToUiY(yBackend) {
   if (!BACKEND_Y_IS_BOTTOM_ORIGIN) return yBackend
   return (WORLD.rows - 1) - yBackend
 }
+
 function uiYToBackendY(yUi) {
   if (!BACKEND_Y_IS_BOTTOM_ORIGIN) return yUi
   return (WORLD.rows - 1) - yUi
 }
 
-/* ===== CRS.Simple mapping (y down) ===== */
+/* ===== CRS.Simple mapping ===== */
 
 function tileTopLeftLatLng(x, yUi) {
   return L.latLng(-yUi * WORLD.cellPx, x * WORLD.cellPx)
@@ -514,12 +722,104 @@ function latLngToTileHit(latlng) {
 
   const x = clamp(Math.floor(rawX), 0, WORLD.cols - 1)
   const y = clamp(Math.floor(rawY), 0, WORLD.rows - 1)
-
   const ox = clamp(rawX - x, 0, 1)
   const oy = clamp(rawY - y, 0, 1)
 
   return { x, y, ox, oy }
 }
+
+/* ===== vehicle helpers ===== */
+
+function applyVehiclePayload(payload) {
+  const x = Number(payload?.x)
+  const y = Number(payload?.y)
+  const dx = Number(payload?.dir?.[0] ?? 0)
+  const dy = Number(payload?.dir?.[1] ?? 0)
+  const speed = Number(payload?.speed ?? 0)
+
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return
+
+  vehicleTarget.x = x
+  vehicleTarget.y = y
+  vehicleTarget.dir = [dx, dy]
+  vehicleTarget.speed = Number.isFinite(speed) ? speed : 0
+  vehicleTarget.visible = true
+
+  if (!vehicle.visible) {
+    vehicle.x = x
+    vehicle.y = y
+    vehicle.dir = [dx, dy]
+    vehicle.speed = vehicleTarget.speed
+    vehicle.visible = true
+    lastVehicleRenderMs = 0
+  }
+}
+
+function updateVehicleRender() {
+  if (!vehicleTarget.visible) return
+
+  const now = performance.now()
+
+  if (!lastVehicleRenderMs) {
+    lastVehicleRenderMs = now
+    vehicle.x = vehicleTarget.x
+    vehicle.y = vehicleTarget.y
+    vehicle.dir = [...vehicleTarget.dir]
+    vehicle.speed = vehicleTarget.speed
+    vehicle.visible = true
+    return
+  }
+
+  const dt = Math.min((now - lastVehicleRenderMs) / 1000, 0.05)
+  lastVehicleRenderMs = now
+
+  const catchup = 12
+  const alpha = 1 - Math.exp(-catchup * dt)
+
+  vehicle.x += (vehicleTarget.x - vehicle.x) * alpha
+  vehicle.y += (vehicleTarget.y - vehicle.y) * alpha
+
+  vehicle.dir = [...vehicleTarget.dir]
+  vehicle.speed = vehicleTarget.speed
+  vehicle.visible = true
+}
+
+async function toggleRideMode() {
+  if (followVehicle.value) {
+    followVehicle.value = false
+    return
+  }
+
+  centerOnVehicle()
+
+  anchors.value = []
+  pinnedAnchor.value = null
+
+  await new Promise(requestAnimationFrame)
+
+  updateCellPxLayer()
+  updateAnchorCameraLayer()
+
+  await refreshViewport()
+  await refreshInfraMoveEnd()
+
+  drawGrid()
+  followVehicle.value = true
+}
+
+function centerOnVehicle() {
+  if (!map || !vehicle.visible) return
+
+  map.setView(
+    L.latLng(
+      -(vehicle.y * WORLD.cellPx),
+      vehicle.x * WORLD.cellPx
+    ),
+    map.getZoom(),
+    { animate: false }
+  )
+}
+
 
 /* ===== infra helpers ===== */
 
@@ -614,7 +914,75 @@ async function handleTileClick(t, event = null) {
   router.push({ name: 'tile', params: { z: WORLD.z, x: t.x, y: t.y } })
 }
 
+let builderLayer = null
+
+function ensureBuilderLayer() {
+  if (!builderLayer) {
+    builderLayer = L.layerGroup().addTo(map)
+  }
+}
+
+function renderBuilderOverlay() {
+  if (!map) return
+  ensureBuilderLayer()
+  builderLayer.clearLayers()
+
+  selectedTiles.value.forEach(({ x, y }) => {
+    const nw = tileTopLeftLatLng(x, y)
+    const se = tileTopLeftLatLng(x + 1, y + 1)
+
+    L.rectangle([nw, se], {
+      color: '#00ffff',
+      weight: 1,
+      fillColor: '#00ffff',
+      fillOpacity: 0.25,
+      interactive: false,
+    }).addTo(builderLayer)
+  })
+}
+
+function exportCSV() {
+  const rows = ['x,y,z,role,ddt,flippable,title,tile_key']
+
+  selectedTiles.value.forEach(({ x, y }) => {
+    rows.push(`${x},${y},10,road,1,0,Road 10:${x}:${y},10:${x}:${y}`)
+  })
+
+  const blob = new Blob([rows.join('\n')], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'road.csv'
+  a.click()
+
+  URL.revokeObjectURL(url)
+}
+
+function clearSelection() {
+  selectedTiles.value = []
+  selectedSet.clear()
+  renderBuilderOverlay()
+}
+
 function onTileClick(t, event) {
+  if (builderMode.value) {
+    const x = Number(t.x)
+    const y = Number(t.y)
+    const key = `${x}:${y}`
+
+    if (selectedSet.has(key)) {
+      selectedSet.delete(key)
+      selectedTiles.value = selectedTiles.value.filter(tile => tile.key !== key)
+    } else {
+      selectedSet.add(key)
+      selectedTiles.value.push({ x, y, key })
+    }
+
+    renderBuilderOverlay()
+    return
+  }
+
   if (t?.flippable === false) return
   handleTileClick(t, event)
 }
@@ -667,6 +1035,12 @@ function cellPxInLayer() {
   return Math.abs(p1.x - p0.x) || WORLD.cellPx
 }
 
+let _cellPxLayer = WORLD.cellPx
+
+function updateCellPxLayer() {
+  _cellPxLayer = cellPxInLayer()
+}
+
 const camL = {
   xmin: 0,
   ymin: 0,
@@ -686,13 +1060,14 @@ function updateAnchorCameraLayer() {
   camL.px0 = p0.x
   camL.py0 = p0.y
 
-  camL.cell = cellPxInLayer()
+  camL.cell = _cellPxLayer
 }
 
 /* ===== infra visuals ===== */
 
 let gravelPattern = null
 let brickPattern = null
+let grassPattern = null
 
 function makeGravelPattern() {
   const c = document.createElement('canvas')
@@ -717,7 +1092,7 @@ function makeGravelPattern() {
     const y = Math.random() * c.height
     const w = Math.random() * 2.2 + 0.6
     const h = Math.random() * 1.6 + 0.4
-    const a = (Math.random() * Math.PI)
+    const a = Math.random() * Math.PI
     const alpha = Math.random() * 0.18 + 0.04
     chip(x, y, w, h, a, `rgba(55,55,55,${alpha})`)
   }
@@ -727,7 +1102,7 @@ function makeGravelPattern() {
     const y = Math.random() * c.height
     const w = Math.random() * 2.6 + 0.8
     const h = Math.random() * 1.9 + 0.5
-    const a = (Math.random() * Math.PI)
+    const a = Math.random() * Math.PI
     const alpha = Math.random() * 0.12 + 0.03
     chip(x, y, w, h, a, `rgba(235,235,235,${alpha})`)
   }
@@ -737,7 +1112,7 @@ function makeGravelPattern() {
     const y = Math.random() * c.height
     const w = Math.random() * 5.5 + 2.0
     const h = Math.random() * 3.5 + 1.5
-    const a = (Math.random() * Math.PI)
+    const a = Math.random() * Math.PI
     const alpha = Math.random() * 0.10 + 0.03
     chip(x, y, w, h, a, `rgba(80,80,80,${alpha})`)
   }
@@ -797,6 +1172,26 @@ function makeBrickPattern() {
   return g.createPattern(c, 'repeat')
 }
 
+function makeGrassPattern() {
+  const c = document.createElement('canvas')
+  c.width = 128
+  c.height = 128
+  const g = c.getContext('2d')
+
+  g.fillStyle = 'rgba(36, 68, 48, 0.9)'
+  g.fillRect(0, 0, c.width, c.height)
+
+  for (let i = 0; i < 1500; i++) {
+    const x = Math.random() * c.width
+    const y = Math.random() * c.height
+    const h = Math.random() * 4 + 2
+    g.fillStyle = `rgba(60, ${100 + Math.random() * 60}, 60, 0.22)`
+    g.fillRect(x, y, 1, h)
+  }
+
+  return g.createPattern(c, 'repeat')
+}
+
 /* ===== anchors ===== */
 
 function tileStyle(t) {
@@ -805,7 +1200,7 @@ function tileStyle(t) {
   const inPane = anchorsAreInLeafletPane()
 
   if (inPane) {
-    const cell = camL.cell
+    const cell = _cellPxLayer
     const px = camL.px0 + (t.x - camL.xmin) * cell
     const py = camL.py0 + (t.y - camL.ymin) * cell
 
@@ -910,6 +1305,7 @@ async function refreshViewport() {
     }
 
     anchors.value = list
+    preloadAnchorCovers(list)
     anchorCacheSize.value = anchorCache.size
 
     anchorPruneCounter++
@@ -955,30 +1351,13 @@ async function refreshInfraForRect_UI(uiRect) {
   const yminBackend = Math.min(by1, by2)
   const ymaxBackend = Math.max(by1, by2)
 
-  const qs = new URLSearchParams({
-    z: String(WORLD.z),
-    xmin: String(uiRect.xmin),
-    xmax: String(uiRect.xmax),
-    ymin: String(yminBackend),
-    ymax: String(ymaxBackend),
+  const data = await fetchInfra({
+    z: WORLD.z,
+    xmin: uiRect.xmin,
+    xmax: uiRect.xmax,
+    ymin: yminBackend,
+    ymax: ymaxBackend,
   })
-
-  const res = await fetch(`/api/world/infra?${qs.toString()}`, {
-    headers: { Accept: 'application/json' },
-  })
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '')
-    throw new Error(`infra HTTP ${res.status}: ${txt.slice(0, 120)}`)
-  }
-
-  const ct = res.headers.get('content-type') || ''
-  if (!ct.includes('application/json')) {
-    const txt = await res.text().catch(() => '')
-    throw new Error(`infra not JSON (ct=${ct}) ${txt.slice(0, 120)}`)
-  }
-
-  const data = await res.json()
 
   for (const t of data) {
     const x = Number(t.x)
@@ -1084,6 +1463,8 @@ async function refreshActiveCellIfNeeded() {
         lastSeenMs: Date.now(),
       }
 
+      if (fullAnchor.cover) preloadCover(fullAnchor.cover)
+
       pinnedAnchor.value = fullAnchor
 
       touchAnchor(kk, fullAnchor)
@@ -1103,7 +1484,11 @@ async function refreshActiveCellIfNeeded() {
           : a
       )
 
-      if (!tabByKey[kk]) tabByKey[kk] = 'embed'
+      const remembered = tabByKey[kk]
+      const tabs = tabsForTile(fullAnchor)
+      if (!isTabOpenableForObject(fullAnchor.object, tabs, remembered)) {
+        tabByKey[kk] = firstOpenableTabForTile(fullAnchor)
+      }
     } else {
       pinnedAnchor.value = null
     }
@@ -1139,7 +1524,7 @@ async function centerDeepLinkIfNeeded() {
   const yBackend = uiYToBackendY(yUi)
 
   try {
-    const data = await fetchCell({ x, y: yBackend })
+    const data = await fetchCell({ x, y: yBackend, full: 1 })
     const ax = Number(data?.anchor?.x ?? x)
     const ayBackend = Number(data?.anchor?.y ?? yBackend)
     const aw = Math.max(1, Number(data?.anchor?.w ?? 1))
@@ -1217,9 +1602,11 @@ function drawGrid() {
   if (brickPattern?.setTransform) {
     brickPattern.setTransform(new DOMMatrix().translate(px0, py0))
   }
+  if (grassPattern?.setTransform) {
+    grassPattern.setTransform(new DOMMatrix().translate(px0, py0))
+  }
 
   const useTextures = cellPxScreen >= 40
-  const useDetailEdges = cellPxScreen >= 60
 
   for (let y = ymin; y <= ymax; y++) {
     const py = py0 + (y - ymin) * cellPxScreen
@@ -1236,30 +1623,59 @@ function drawGrid() {
       }
 
       if (role === ROLE.YBR) {
-        ctx.fillStyle = 'rgba(244, 197, 66, 0.70)'
-        ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+        const s = cellPxScreen
+        const BORDER = Math.min(48 * screenScale(), s * 0.32)
+
+        const hasLeft  = x > 0 && infraGrid[idxOf(x - 1, y)] === ROLE.YBR
+        const hasRight = x < WORLD.cols - 1 && infraGrid[idxOf(x + 1, y)] === ROLE.YBR
+        const hasUp    = y > 0 && infraGrid[idxOf(x, y - 1)] === ROLE.YBR
+        const hasDown  = y < WORLD.rows - 1 && infraGrid[idxOf(x, y + 1)] === ROLE.YBR
+
+        // base YBR
+        ctx.fillStyle = 'rgba(210, 170, 40, 0.55)'
+        ctx.fillRect(px, py, s, s)
+
+        // optional inner polish
+        if (s > BORDER * 2) {
+          ctx.fillStyle = 'rgba(255, 210, 90, 0.08)'
+          ctx.fillRect(px + BORDER, py + BORDER, s - BORDER * 2, s - BORDER * 2)
+        }
+
+        // outer border only where edge is exposed
+        // ctx.fillStyle = 'rgba(55, 32, 14, 0.95)'
+        ctx.fillStyle = 'rgb(20, 10, 5)'
+
+        if (!hasUp) {
+          ctx.fillRect(px, py, s, BORDER)
+        }
+        if (!hasDown) {
+          ctx.fillRect(px, py + s - BORDER, s, BORDER)
+        }
+        if (!hasLeft) {
+          ctx.fillRect(px, py, BORDER, s)
+        }
+        if (!hasRight) {
+          ctx.fillRect(px + s - BORDER, py, BORDER, s)
+        }
 
         if (useTextures && brickPattern) {
           ctx.fillStyle = brickPattern
-          ctx.globalAlpha = 0.95
-          ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+          ctx.globalAlpha = 0.85
+          ctx.fillRect(px, py, s, s)
           ctx.globalAlpha = 1
         }
       } else if (role === ROLE.ROAD) {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.10)'
+        ctx.fillStyle = 'rgba(46, 84, 58, 0.85)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
 
-        if (useTextures && gravelPattern) {
-          ctx.fillStyle = gravelPattern
-          ctx.globalAlpha = 1
+        if (useTextures && grassPattern) {
+          ctx.fillStyle = grassPattern
           ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
         }
 
-        if (useDetailEdges) {
-          ctx.strokeStyle = 'rgba(0,0,0,0.12)'
-          ctx.lineWidth = 1
-          ctx.strokeRect(px + 0.5, py + 0.5, cellPxScreen - 1, cellPxScreen - 1)
-        }
+        ctx.strokeStyle = 'rgba(0,0,0,0.06)'
+        ctx.lineWidth = 1
+        ctx.strokeRect(px + 0.5, py + 0.5, cellPxScreen - 1, cellPxScreen - 1)
       } else if (role === ROLE.PLAZA) {
         ctx.fillStyle = 'rgba(90, 90, 90, 0.10)'
         ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
@@ -1289,11 +1705,29 @@ function drawGrid() {
 
 function scheduleFrame() {
   if (raf) return
+
   raf = requestAnimationFrame(() => {
     raf = 0
+
+    updateCellPxLayer()
     updateAnchorCameraLayer()
+    updateVehicleRender()
+
+    if (followVehicle.value && vehicle.visible && map) {
+      map.setView(
+        L.latLng(
+          -(vehicle.y * WORLD.cellPx),
+          vehicle.x * WORLD.cellPx
+        ),
+        map.getZoom(),
+        { animate: false }
+      )
+    }
+
     drawGrid()
     updateHud()
+
+    scheduleFrame()
   })
 }
 
@@ -1309,9 +1743,8 @@ async function handleRoutePipeline() {
     !hasInitialized ||
     (source !== 'click' && (route.name === 'tile' || route.name === 'object'))
 
-  let deepLinkCell = null
   if (isDeepLinkCenterCase) {
-    deepLinkCell = await centerDeepLinkIfNeeded()
+    await centerDeepLinkIfNeeded()
   }
 
   if (source !== 'click' && route.name === 'tile') {
@@ -1319,19 +1752,25 @@ async function handleRoutePipeline() {
     const ry = Number(route.params.y)
 
     if (Number.isFinite(rx) && Number.isFinite(ry)) {
-      let data = deepLinkCell
+      const yBackend = uiYToBackendY(ry)
 
-      if (!data) {
-        const yBackend = uiYToBackendY(ry)
-        try {
-          data = await fetchCell({ x: rx, y: yBackend })
-        } catch (_) {
-          data = null
-        }
+      let data = null
+      try {
+        data = await fetchCell({ x: rx, y: yBackend, full: 1 })
+      } catch (_) {
+        data = null
       }
 
       const canFlip = data?.flippable === true
-      flippedKey.value = canFlip ? `${rx}:${ry}` : null
+
+      if (canFlip) {
+        const key = `${rx}:${ry}`
+        const fakeTile = { x: rx, y: ry, object: data?.object || null }
+        tabByKey[key] = firstOpenableTabForTile(fakeTile)
+        flippedKey.value = key
+      } else {
+        flippedKey.value = null
+      }
     }
   }
 
@@ -1356,6 +1795,11 @@ function installDDTDragGating() {
   const container = map.getContainer()
 
   ddtPointerDownHandler = (e) => {
+    if (followVehicle.value) {
+      map.dragging.disable()
+      return
+    }
+
     const noDrag = e.target?.closest?.(
       '.tile-ui, .tile-tabs, .tile-body, .tile-panel, iframe, a, button, input, textarea, select'
     )
@@ -1423,9 +1867,8 @@ function markerLatLngForTile(x, y, ox = 0.5, oy = 0.5) {
   return L.latLng(lat, lng)
 }
 
-function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
-  if (!map) return
-  if (!id) return
+function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5, avatarUrl = null }) {
+  if (!map || !id) return
   if (!Number.isFinite(x) || !Number.isFinite(y)) return
 
   ensurePresencePane()
@@ -1433,17 +1876,64 @@ function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
   const ll = markerLatLngForTile(x, y, ox, oy)
   let marker = presenceMarkers.get(id)
   const isSelf = id === ownSocketId
-  const style = isSelf ? PRESENCE_STYLE_SELF : PRESENCE_STYLE_OTHER
+
+  const fallbackAvatar = isSelf ? selfAvatar : otherAvatar
+  const finalAvatarUrl = avatarUrl || fallbackAvatar
 
   if (!marker) {
-    marker = L.circleMarker(ll, style).addTo(map)
+    const icon = L.divIcon({
+      className: `presence-avatar ${isSelf ? 'is-self' : 'is-other'}`,
+      html: `
+        <div class="presence-avatar__inner">
+          <img
+            class="presence-avatar__img"
+            src="${finalAvatarUrl}"
+            alt=""
+            draggable="false"
+          />
+        </div>
+      `,
+      iconSize: [32, 32],
+      iconAnchor: [16, 16],
+    })
+
+    marker = L.marker(ll, {
+      icon,
+      pane: PRESENCE_PANE,
+      interactive: false,
+      keyboard: false,
+    }).addTo(map)
+
+    const el = marker.getElement()
+    if (el) {
+      marker._avatarImg = el.querySelector('.presence-avatar__img')
+    }
+
     presenceMarkers.set(id, marker)
     syncPresenceCount()
     return
   }
 
+  const prev = marker.getLatLng()
+  const moved = !prev || prev.lat !== ll.lat || prev.lng !== ll.lng
+  if (!moved) return
+
   marker.setLatLng(ll)
-  marker.setStyle(style)
+
+  const el = marker.getElement()
+  if (el) {
+    el.classList.toggle('is-self', isSelf)
+    el.classList.toggle('is-other', !isSelf)
+
+    const img = marker._avatarImg
+    if (img && img.src !== finalAvatarUrl) {
+      img.src = finalAvatarUrl
+    }
+
+    el.classList.remove('arrival-pulse')
+    void el.offsetWidth
+    el.classList.add('arrival-pulse')
+  }
 }
 
 function removePresenceMarker(id) {
@@ -1599,6 +2089,14 @@ function initRealtime() {
     clearPresenceMarkers()
   })
 
+  socket.on('vehicle:snapshot', (payload) => {
+    applyVehiclePayload(payload)
+  })
+
+  socket.on('vehicle:update', (payload) => {
+    applyVehiclePayload(payload)
+  })
+
   socket.on('presence:snapshot', (payload) => {
     const users = Array.isArray(payload?.users) ? payload.users : []
 
@@ -1632,6 +2130,8 @@ function destroyRealtime() {
   if (!socket) return
   socket.off('connect')
   socket.off('disconnect')
+  socket.off('vehicle:snapshot')
+  socket.off('vehicle:update')
   socket.off('presence:snapshot')
   socket.off('presence:update')
   socket.off('presence:leave')
@@ -1640,6 +2140,8 @@ function destroyRealtime() {
   ownSocketId = null
   lastViewportRegions = []
   clearPresenceMarkers()
+  vehicle.visible = false
+  vehicleTarget.visible = false
 }
 
 /* ===== lifecycle ===== */
@@ -1652,6 +2154,8 @@ onMounted(async () => {
   const bounds = L.latLngBounds([0, 0], [-worldHeight, worldWidth])
 
   await new Promise(requestAnimationFrame)
+
+  grassPattern = makeGrassPattern()
 
   const containerWidth = mapEl.value.getBoundingClientRect().width
   const TILE_PX = WORLD.cellPx
@@ -1702,6 +2206,7 @@ onMounted(async () => {
   resizeCanvas()
   ro = new ResizeObserver(() => {
     resizeCanvas()
+    updateCellPxLayer()
     updateAnchorCameraLayer()
     drawGrid()
     updateHud()
@@ -1717,7 +2222,7 @@ onMounted(async () => {
   })
 
   map.on('move', () => {
-    scheduleFrame()
+    if (followVehicle.value) return
     requestInfraWhileMoving()
   })
 
@@ -1735,7 +2240,6 @@ onMounted(async () => {
     } finally {
       isMoving = false
       refreshPresenceForViewport()
-      scheduleFrame()
     }
   })
 
@@ -1745,11 +2249,28 @@ onMounted(async () => {
     if (didMoveSinceDown) return
 
     const target = e.originalEvent?.target
-    if (target && target.closest && target.closest('.tile-shell')) return
+    const clickedAnchor = !!(target && target.closest && target.closest('.tile-shell'))
 
-    if (flippedKey.value) {
+    if (builderMode.value) {
+      if (clickedAnchor) return
+
+      const { x, y } = latLngToTileHit(e.latlng)
+      const key = `${x}:${y}`
+
+      if (selectedSet.has(key)) {
+        selectedSet.delete(key)
+        selectedTiles.value = selectedTiles.value.filter(tile => tile.key !== key)
+      } else {
+        selectedSet.add(key)
+        selectedTiles.value.push({ x, y, key })
+      }
+
+      renderBuilderOverlay()
       return
     }
+
+    if (clickedAnchor) return
+    if (flippedKey.value) return
 
     const { x, y, ox, oy } = latLngToTileHit(e.latlng)
 
@@ -1761,21 +2282,15 @@ onMounted(async () => {
 
   requestAnimationFrame(() => {
     map.invalidateSize({ pan: false })
-    scheduleFrame()
+    updateCellPxLayer()
     handleRoutePipeline().catch(console.error)
+    scheduleFrame()
   })
 })
 
 watch(
   () => route.fullPath,
   () => handleRoutePipeline().catch(console.error)
-)
-
-watch(
-  () => [route.name, route.params.x, route.params.y],
-  () => {
-    // no-op for now; movement is driven by actual clicks / connect join
-  }
 )
 
 watch(
@@ -1803,12 +2318,40 @@ onBeforeUnmount(() => {
 
   anchorCache.clear()
 })
+
+const rideBusOverlayStyle = computed(() => {
+  const angle = Math.atan2(vehicle.dir[1], vehicle.dir[0]) * 180 / Math.PI
+
+  return {
+    transform: `translate(-50%, -50%) rotate(${angle}deg)`,
+  }
+})
+
+const vehicleStyle = computed(() => {
+  const cell = _cellPxLayer
+  const px = camL.px0 + (vehicle.x - camL.xmin) * cell
+  const py = camL.py0 + (vehicle.y - camL.ymin) * cell
+
+  const width = cell * 0.98
+  const height = cell * 0.56
+  const angle = Math.atan2(vehicle.dir[1], vehicle.dir[0]) * 180 / Math.PI
+
+  return {
+    transform: `
+      translate3d(${Math.round(px - width / 2)}px, ${Math.round(py - height / 2)}px, 0)
+      rotate(${angle}deg)
+    `,
+    width: `${Math.round(width)}px`,
+    height: `${Math.round(height)}px`,
+  }
+})
+
 </script>
 
 <style scoped>
 .wrap { position: relative; width: 100vw; height: 100vh; }
 .map { width: 100%; height: 100%; }
-:deep(.leaflet-container) { background: #eee; }
+:deep(.leaflet-container) { background: #141618; }
 
 .grid-canvas {
   position: absolute;
@@ -1836,8 +2379,6 @@ onBeforeUnmount(() => {
 }
 
 .tile-shell.is-active {
-  outline: 4px solid rgba(0, 0, 0, 0.6);
-  outline-offset: -4px;
   z-index: 5;
 }
 
@@ -1857,5 +2398,127 @@ onBeforeUnmount(() => {
   font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   color: #111;
   pointer-events: none;
+}
+
+.builder-ui {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  z-index: 1000;
+  display: flex;
+  gap: 8px;
+}
+
+.vehicle {
+  position: absolute;
+  z-index: 200;
+  pointer-events: none;
+  transform-origin: center center;
+  opacity: 1;
+
+  background: linear-gradient(
+    to bottom,
+    #ff6a6a 0%,
+    #d63a3a 60%,
+    #9f1e1e 100%
+  );
+  border-radius: 12px;
+  border: 2px solid rgba(40, 20, 20, 0.45);
+  box-shadow:
+    0 0 0 3px rgba(255,255,255,0.85),
+    inset 0 -3px 0 rgba(0,0,0,0.16),
+    inset 0 2px 0 rgba(255,255,255,0.18);
+}
+
+.vehicle::before {
+  content: '';
+  position: absolute;
+  left: 14%;
+  right: 14%;
+  top: 18%;
+  height: 26%;
+  border-radius: 6px;
+  background:
+    linear-gradient(
+      to right,
+      rgba(215,235,255,0.88) 0%,
+      rgba(245,250,255,0.96) 50%,
+      rgba(215,235,255,0.88) 100%
+    );
+  box-shadow:
+    inset 0 -1px 0 rgba(0,0,0,0.12),
+    0 1px 0 rgba(255,255,255,0.25);
+}
+
+.vehicle::after {
+  content: '';
+  position: absolute;
+  right: 8%;
+  top: 50%;
+  width: 14%;
+  height: 20%;
+  border-radius: 6px;
+  background: rgba(255, 245, 180, 0.95);
+  transform: translateY(-50%);
+  box-shadow:
+    0 0 8px rgba(255, 240, 160, 0.45),
+    inset 0 -1px 0 rgba(0,0,0,0.18);
+}
+
+.ride-bus-overlay {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 250px;
+  height: 140px;
+  z-index: 1200;
+  pointer-events: none;
+
+  background: linear-gradient(
+    to bottom,
+    #ff6a6a 0%,
+    #d63a3a 60%,
+    #9f1e1e 100%
+  );
+  border-radius: 12px;
+  border: 2px solid rgba(40, 20, 20, 0.45);
+  box-shadow:
+    0 0 0 3px rgba(255,255,255,0.85),
+    inset 0 -3px 0 rgba(0,0,0,0.16),
+    inset 0 2px 0 rgba(255,255,255,0.18);
+}
+
+.ride-bus-overlay::before {
+  content: '';
+  position: absolute;
+  left: 14%;
+  right: 14%;
+  top: 18%;
+  height: 26%;
+  border-radius: 6px;
+  background: linear-gradient(
+    to right,
+    rgba(215,235,255,0.88) 0%,
+    rgba(245,250,255,0.96) 50%,
+    rgba(215,235,255,0.88) 100%
+  );
+  box-shadow:
+    inset 0 -1px 0 rgba(0,0,0,0.12),
+    0 1px 0 rgba(255,255,255,0.25);
+}
+
+.ride-bus-overlay::after {
+  content: '';
+  position: absolute;
+  right: 8%;
+  top: 50%;
+  width: 14%;
+  height: 20%;
+  border-radius: 6px;
+  background: rgba(255, 245, 180, 0.95);
+  transform: translateY(-50%);
+  box-shadow:
+    0 0 8px rgba(255, 240, 160, 0.45),
+    inset 0 -1px 0 rgba(0,0,0,0.18);
 }
 </style>

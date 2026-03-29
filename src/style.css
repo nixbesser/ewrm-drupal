@@ -166,3 +166,48 @@ button:focus-visible {
     background-color: #f9f9f9;
   }
 }
+
+.presence-avatar {
+  width: 32px;
+  height: 32px;
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+  border: 0 !important;
+  pointer-events: none;
+  transition: transform 350ms ease;
+  will-change: transform;
+}
+
+.presence-avatar__inner {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  overflow: hidden;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.presence-avatar__img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.presence-avatar.arrival-pulse .presence-avatar__inner {
+  animation: presence-arrival-pulse 180ms ease-out;
+}
+
+@keyframes presence-arrival-pulse {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.18); }
+  100% { transform: scale(1); }
+}
+
+.presence-avatar {
+  will-change: transform;
+  transform: translateZ(0);
+}

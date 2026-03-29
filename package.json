@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:world": "VITE_API_BASE=https://api.ewrm.io vite build",
+    "deploy:world:prod": "rsync -avz --delete dist/ deploy@ewrm.com:/var/www/ewrm-com/world/",
+    "deploy:world:cms": "rsync -avz --delete dist/ deploy@cms.ewrm.io:/var/www/cms/web/world/",
+    "verify:world:prod": "ssh deploy@ewrm.com \"grep -R -o 'FORCE 1\\|Song tile' /var/www/ewrm-com/world | sort | uniq -c\""
   },
   "dependencies": {
     "leaflet": "^1.9.4",

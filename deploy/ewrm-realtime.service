@@ -1,0 +1,21 @@
+[Unit]
+Description=EWRM Realtime Socket.IO Server
+After=network.target redis-server.service
+Wants=redis-server.service
+
+[Service]
+Type=simple
+User=deploy
+Group=www-data
+WorkingDirectory=/var/www/realtime
+Environment=NODE_ENV=production
+Environment=PORT=4000
+Environment=REDIS_URL=redis://127.0.0.1:6379
+ExecStart=/usr/bin/node /var/www/realtime/server.js
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/ewrm-realtime.log
+StandardError=append:/var/log/ewrm-realtime-error.log
+
+[Install]
+WantedBy=multi-user.target
