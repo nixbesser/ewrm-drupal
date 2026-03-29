@@ -448,22 +448,22 @@ function drawEmptyLandscapeTile(ctx2d, x, y, px, py, cellPx) {
   const kind = emptyTileKind(x, y)
 
   if (kind === 'grass') {
-    ctx2d.fillStyle = 'rgba(170, 186, 135, 0.32)'
+    ctx2d.fillStyle = 'rgba(58, 78, 60, 0.60)'
     ctx2d.fillRect(px, py, cellPx, cellPx)
-    ctx2d.strokeStyle = 'rgba(0,0,0,0.06)'
+    ctx2d.strokeStyle = 'rgba(255,255,255,0.04)'
     ctx2d.lineWidth = 1
     ctx2d.strokeRect(px + 0.5, py + 0.5, cellPx - 1, cellPx - 1)
   } else if (kind === 'dirt') {
-    ctx2d.fillStyle = 'rgba(160, 136, 102, 0.28)'
+    ctx2d.fillStyle = 'rgba(78, 64, 52, 0.58)'
     ctx2d.fillRect(px, py, cellPx, cellPx)
   } else if (kind === 'scrub') {
-    ctx2d.fillStyle = 'rgba(150, 165, 120, 0.24)'
+    ctx2d.fillStyle = 'rgba(70, 76, 56, 0.56)'
     ctx2d.fillRect(px, py, cellPx, cellPx)
   } else if (kind === 'sand') {
-    ctx2d.fillStyle = 'rgba(196, 180, 126, 0.22)'
+    ctx2d.fillStyle = 'rgba(92, 84, 60, 0.52)'
     ctx2d.fillRect(px, py, cellPx, cellPx)
   } else {
-    ctx2d.fillStyle = 'rgba(145, 145, 145, 0.16)'
+    ctx2d.fillStyle = 'rgba(62, 66, 74, 0.52)'
     ctx2d.fillRect(px, py, cellPx, cellPx)
   }
 
@@ -2198,8 +2198,8 @@ const vehicleStyle = computed(() => {
   const px = camL.px0 + (vehicle.x - camL.xmin) * cell
   const py = camL.py0 + (vehicle.y - camL.ymin) * cell
 
-  const width = cell * 0.9
-  const height = cell * 0.52
+  const width = cell * 0.98
+  const height = cell * 0.56
   const angle = Math.atan2(vehicle.dir[1], vehicle.dir[0]) * 180 / Math.PI
 
   return {
@@ -2211,12 +2211,13 @@ const vehicleStyle = computed(() => {
     height: `${Math.round(height)}px`,
   }
 })
+
 </script>
 
 <style scoped>
 .wrap { position: relative; width: 100vw; height: 100vh; }
 .map { width: 100%; height: 100%; }
-:deep(.leaflet-container) { background: #eee; }
+:deep(.leaflet-container) { background: #1b1d20; }
 
 .grid-canvas {
   position: absolute;
@@ -2276,26 +2277,57 @@ const vehicleStyle = computed(() => {
 
 .vehicle {
   position: absolute;
-  background: #d22;
-  border-radius: 10px;
   z-index: 200;
   pointer-events: none;
   transform-origin: center center;
+  opacity: 1;
+
+  background: linear-gradient(
+    to bottom,
+    #e14b4b 0%,
+    #cf2f2f 58%,
+    #a91f1f 100%
+  );
+  border-radius: 12px;
+  border: 2px solid rgba(40, 20, 20, 0.45);
   box-shadow:
     0 0 0 3px rgba(255,255,255,0.85),
-    inset 0 -2px 0 rgba(0,0,0,0.18);
-  opacity: 1;
+    inset 0 -3px 0 rgba(0,0,0,0.16),
+    inset 0 2px 0 rgba(255,255,255,0.18);
+}
+
+.vehicle::before {
+  content: '';
+  position: absolute;
+  left: 14%;
+  right: 14%;
+  top: 18%;
+  height: 26%;
+  border-radius: 6px;
+  background:
+    linear-gradient(
+      to right,
+      rgba(215,235,255,0.88) 0%,
+      rgba(245,250,255,0.96) 50%,
+      rgba(215,235,255,0.88) 100%
+    );
+  box-shadow:
+    inset 0 -1px 0 rgba(0,0,0,0.12),
+    0 1px 0 rgba(255,255,255,0.25);
 }
 
 .vehicle::after {
   content: '';
   position: absolute;
-  right: 10%;
+  right: 8%;
   top: 50%;
-  width: 18%;
-  height: 18%;
-  border-radius: 50%;
-  background: rgba(255,255,255,0.9);
+  width: 14%;
+  height: 20%;
+  border-radius: 6px;
+  background: rgba(255, 245, 180, 0.95);
   transform: translateY(-50%);
+  box-shadow:
+    0 0 8px rgba(255, 240, 160, 0.45),
+    inset 0 -1px 0 rgba(0,0,0,0.18);
 }
 </style>
