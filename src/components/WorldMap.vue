@@ -31,7 +31,7 @@
       </div>
 
       <div
-        v-if="vehicle.visible"
+        v-if="vehicle.visible && !followVehicle"
         class="vehicle"
         :style="vehicleStyle"
       ></div>
@@ -69,6 +69,10 @@
         Center on Bus
       </button>
 
+      <button @click="followVehicle = !followVehicle">
+        {{ followVehicle ? 'Stop Ride' : 'Ride Bus' }}
+      </button>
+
       <span
         v-if="builderMode"
         style="background: rgba(255,255,255,0.9); padding: 6px 8px; border-radius: 6px;"
@@ -76,6 +80,13 @@
         {{ selectedTiles.length }} selected
       </span>
     </div>
+
+    <div
+      v-if="vehicle.visible && followVehicle"
+      class="ride-bus-overlay"
+      :style="rideBusOverlayStyle"
+    ></div>
+
   </div>
 </template>
 
@@ -112,6 +123,8 @@ const REALTIME_PATH = '/rt/'
 const PRESENCE_PANE = 'ewrmPresence'
 const PRESENCE_REGION_SIZE = 128
 
+const followVehicle = ref(false)
+
 const vehicle = reactive({
   x: 0.5,
   y: 0.5,
@@ -130,9 +143,14 @@ const vehicleTarget = reactive({
 
 const VEHICLE_LERP = 0.18
 
+let lastVehicleRenderMs = 0
+
 const builderMode = ref(false)
 const selectedTiles = ref([])
 const selectedSet = new Set()
+
+let lastRidePanMs = 0
+const RIDE_PAN_INTERVAL_MS = 80
 
 let socket = null
 let ownSocketId = null
@@ -625,6 +643,16 @@ function fillSmartRoundedRect(ctx2d, x, y, w, h, r, tx, ty) {
   ctx2d.fill()
 }
 
+function syncRideModeDragState() {
+  if (!map) return
+
+  if (followVehicle.value) {
+    map.dragging.disable()
+  } else {
+    map.dragging.disable()
+  }
+}
+
 /* ===== anchor cache helpers ===== */
 
 function anchorKey(x, yUi) {
@@ -723,14 +751,34 @@ function applyVehiclePayload(payload) {
     vehicle.dir = [dx, dy]
     vehicle.speed = vehicleTarget.speed
     vehicle.visible = true
+    lastVehicleRenderMs = 0
   }
 }
 
 function updateVehicleRender() {
   if (!vehicleTarget.visible) return
 
-  vehicle.x += (vehicleTarget.x - vehicle.x) * VEHICLE_LERP
-  vehicle.y += (vehicleTarget.y - vehicle.y) * VEHICLE_LERP
+  const now = performance.now()
+
+  if (!lastVehicleRenderMs) {
+    lastVehicleRenderMs = now
+    vehicle.x = vehicleTarget.x
+    vehicle.y = vehicleTarget.y
+    vehicle.dir = [...vehicleTarget.dir]
+    vehicle.speed = vehicleTarget.speed
+    vehicle.visible = true
+    return
+  }
+
+  const dt = Math.min((now - lastVehicleRenderMs) / 1000, 0.05)
+  lastVehicleRenderMs = now
+
+  const catchup = 12
+  const alpha = 1 - Math.exp(-catchup * dt)
+
+  vehicle.x += (vehicleTarget.x - vehicle.x) * alpha
+  vehicle.y += (vehicleTarget.y - vehicle.y) * alpha
+
   vehicle.dir = [...vehicleTarget.dir]
   vehicle.speed = vehicleTarget.speed
   vehicle.visible = true
@@ -1614,6 +1662,18 @@ function scheduleFrame() {
     updateCellPxLayer()
     updateAnchorCameraLayer()
     updateVehicleRender()
+
+    if (followVehicle.value && vehicle.visible && map) {
+      map.setView(
+        L.latLng(
+          -(vehicle.y * WORLD.cellPx),
+          vehicle.x * WORLD.cellPx
+        ),
+        map.getZoom(),
+        { animate: false }
+      )
+    }
+
     drawGrid()
     updateHud()
 
@@ -1685,6 +1745,11 @@ function installDDTDragGating() {
   const container = map.getContainer()
 
   ddtPointerDownHandler = (e) => {
+    if (followVehicle.value) {
+      map.dragging.disable()
+      return
+    }
+
     const noDrag = e.target?.closest?.(
       '.tile-ui, .tile-tabs, .tile-body, .tile-panel, iframe, a, button, input, textarea, select'
     )
@@ -2107,6 +2172,7 @@ onMounted(async () => {
   })
 
   map.on('move', () => {
+    if (followVehicle.value) return
     requestInfraWhileMoving()
   })
 
@@ -2201,6 +2267,14 @@ onBeforeUnmount(() => {
   map = null
 
   anchorCache.clear()
+})
+
+const rideBusOverlayStyle = computed(() => {
+  const angle = Math.atan2(vehicle.dir[1], vehicle.dir[0]) * 180 / Math.PI
+
+  return {
+    transform: `translate(-50%, -50%) rotate(${angle}deg)`,
+  }
 })
 
 const vehicleStyle = computed(() => {
@@ -2327,6 +2401,63 @@ const vehicleStyle = computed(() => {
 }
 
 .vehicle::after {
+  content: '';
+  position: absolute;
+  right: 8%;
+  top: 50%;
+  width: 14%;
+  height: 20%;
+  border-radius: 6px;
+  background: rgba(255, 245, 180, 0.95);
+  transform: translateY(-50%);
+  box-shadow:
+    0 0 8px rgba(255, 240, 160, 0.45),
+    inset 0 -1px 0 rgba(0,0,0,0.18);
+}
+
+.ride-bus-overlay {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 250px;
+  height: 140px;
+  z-index: 1200;
+  pointer-events: none;
+
+  background: linear-gradient(
+    to bottom,
+    #ff6a6a 0%,
+    #d63a3a 60%,
+    #9f1e1e 100%
+  );
+  border-radius: 12px;
+  border: 2px solid rgba(40, 20, 20, 0.45);
+  box-shadow:
+    0 0 0 3px rgba(255,255,255,0.85),
+    inset 0 -3px 0 rgba(0,0,0,0.16),
+    inset 0 2px 0 rgba(255,255,255,0.18);
+}
+
+.ride-bus-overlay::before {
+  content: '';
+  position: absolute;
+  left: 14%;
+  right: 14%;
+  top: 18%;
+  height: 26%;
+  border-radius: 6px;
+  background: linear-gradient(
+    to right,
+    rgba(215,235,255,0.88) 0%,
+    rgba(245,250,255,0.96) 50%,
+    rgba(215,235,255,0.88) 100%
+  );
+  box-shadow:
+    inset 0 -1px 0 rgba(0,0,0,0.12),
+    0 1px 0 rgba(255,255,255,0.25);
+}
+
+.ride-bus-overlay::after {
   content: '';
   position: absolute;
   right: 8%;
