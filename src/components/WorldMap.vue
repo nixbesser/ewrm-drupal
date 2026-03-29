@@ -69,7 +69,7 @@
         Center on Bus
       </button>
 
-      <button @click="followVehicle = !followVehicle">
+      <button @click="toggleRideMode">
         {{ followVehicle ? 'Stop Ride' : 'Ride Bus' }}
       </button>
 
@@ -782,6 +782,29 @@ function updateVehicleRender() {
   vehicle.dir = [...vehicleTarget.dir]
   vehicle.speed = vehicleTarget.speed
   vehicle.visible = true
+}
+
+async function toggleRideMode() {
+  if (followVehicle.value) {
+    followVehicle.value = false
+    return
+  }
+
+  centerOnVehicle()
+
+  anchors.value = []
+  pinnedAnchor.value = null
+
+  await new Promise(requestAnimationFrame)
+
+  updateCellPxLayer()
+  updateAnchorCameraLayer()
+
+  await refreshViewport()
+  await refreshInfraMoveEnd()
+
+  drawGrid()
+  followVehicle.value = true
 }
 
 function centerOnVehicle() {
@@ -1600,18 +1623,45 @@ function drawGrid() {
       }
 
       if (role === ROLE.YBR) {
-        // base glow
-        ctx.fillStyle = 'rgba(210, 170, 40, 0.55)'
-        ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+        const s = cellPxScreen
+        const BORDER = Math.min(48 * screenScale(), s * 0.32)
 
-        // soft bloom (important)
-        ctx.fillStyle = 'rgba(255, 210, 90, 0.12)'
-        ctx.fillRect(px - 2, py - 2, cellPxScreen + 4, cellPxScreen + 4)
+        const hasLeft  = x > 0 && infraGrid[idxOf(x - 1, y)] === ROLE.YBR
+        const hasRight = x < WORLD.cols - 1 && infraGrid[idxOf(x + 1, y)] === ROLE.YBR
+        const hasUp    = y > 0 && infraGrid[idxOf(x, y - 1)] === ROLE.YBR
+        const hasDown  = y < WORLD.rows - 1 && infraGrid[idxOf(x, y + 1)] === ROLE.YBR
+
+        // base YBR
+        ctx.fillStyle = 'rgba(210, 170, 40, 0.55)'
+        ctx.fillRect(px, py, s, s)
+
+        // optional inner polish
+        if (s > BORDER * 2) {
+          ctx.fillStyle = 'rgba(255, 210, 90, 0.08)'
+          ctx.fillRect(px + BORDER, py + BORDER, s - BORDER * 2, s - BORDER * 2)
+        }
+
+        // outer border only where edge is exposed
+        // ctx.fillStyle = 'rgba(55, 32, 14, 0.95)'
+        ctx.fillStyle = 'rgb(20, 10, 5)'
+
+        if (!hasUp) {
+          ctx.fillRect(px, py, s, BORDER)
+        }
+        if (!hasDown) {
+          ctx.fillRect(px, py + s - BORDER, s, BORDER)
+        }
+        if (!hasLeft) {
+          ctx.fillRect(px, py, BORDER, s)
+        }
+        if (!hasRight) {
+          ctx.fillRect(px + s - BORDER, py, BORDER, s)
+        }
 
         if (useTextures && brickPattern) {
           ctx.fillStyle = brickPattern
           ctx.globalAlpha = 0.85
-          ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+          ctx.fillRect(px, py, s, s)
           ctx.globalAlpha = 1
         }
       } else if (role === ROLE.ROAD) {
