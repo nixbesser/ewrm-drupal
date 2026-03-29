@@ -4,7 +4,7 @@ import SubscribeView from './components/SubscribeView.vue'
 import NewsletterRedirect from './components/NewsletterRedirect.vue'
 
 export const router = createRouter({
-  history: createWebHistory('/'),
+  history: createWebHistory('/world/'),
   routes: [
     { path: '/', redirect: '/w/10/0/0' },
 
