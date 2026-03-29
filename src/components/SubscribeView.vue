@@ -7,8 +7,6 @@
       </p>
 
       <form v-if="!success" class="subscribe-form" @submit.prevent="subscribe">
-<<<<<<< HEAD
-=======
         <label class="field">
           <span>Name (optional)</span>
           <input
@@ -18,7 +16,6 @@
             placeholder="Your name"
           />
         </label>
->>>>>>> rescue/mobile-cover-flicker
 
         <label class="field">
           <span>Email</span>
@@ -36,8 +33,6 @@
           <span>I agree to receive email from EWRM.</span>
         </label>
 
-<<<<<<< HEAD
-=======
         <input
           v-model.trim="company"
           type="text"
@@ -47,7 +42,6 @@
           class="hp-field"
         />
 
->>>>>>> rescue/mobile-cover-flicker
         <button type="submit" :disabled="loading || !consent">
           {{ loading ? 'Subscribing…' : 'Subscribe' }}
         </button>
@@ -65,13 +59,9 @@
 <script setup>
 import { ref } from 'vue'
 
-<<<<<<< HEAD
-const email = ref('')
-=======
 const name = ref('')
 const email = ref('')
 const company = ref('')
->>>>>>> rescue/mobile-cover-flicker
 const consent = ref(false)
 const loading = ref(false)
 const success = ref(false)
@@ -95,13 +85,9 @@ async function subscribe() {
         Accept: 'application/json',
       },
       body: JSON.stringify({
-<<<<<<< HEAD
-        email: email.value,
-=======
         name: name.value,
         email: email.value,
         company: company.value,
->>>>>>> rescue/mobile-cover-flicker
         consent: consent.value,
         source: 'website',
       }),
@@ -114,13 +100,9 @@ async function subscribe() {
     }
 
     success.value = true
-<<<<<<< HEAD
-    email.value = ''
-=======
     name.value = ''
     email.value = ''
     company.value = ''
->>>>>>> rescue/mobile-cover-flicker
     consent.value = false
   } catch (err) {
     error.value = err?.message || 'Something went wrong.'
