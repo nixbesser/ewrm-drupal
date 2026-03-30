@@ -30,11 +30,11 @@
         />
       </div>
 
-      <div
+      <!-- <div
         v-if="vehicle.visible && !followVehicle"
         class="vehicle"
         :style="vehicleStyle"
-      ></div>
+      ></div> -->
     </div>
 
     <div class="hud">
@@ -81,11 +81,24 @@
       </span>
     </div>
 
-    <div
+    <!-- <div
       v-if="vehicle.visible && followVehicle"
       class="ride-bus-overlay"
       :style="rideBusOverlayStyle"
-    ></div>
+    ></div> -->
+
+<div
+      v-if="vehicle.visible && followVehicle"
+      class="ride-vehicle-overlay"
+      :style="rideVehicleOverlayStyle"
+    >
+      <img
+        class="ride-vehicle-overlay__img"
+        :src="vehicleImgSrc"
+        alt=""
+        draggable="false"
+      />
+    </div>
 
   </div>
 </template>
@@ -112,6 +125,14 @@ const PAD_DRAW = 2
 
 const INFRA_MOVE_THROTTLE_MS = 250
 
+const RIDE_INFRA_PAD = 28
+const RIDE_INFRA_THROTTLE_MS = 140
+
+const vehicleImgSrc = `${import.meta.env.BASE_URL}vehicles/ladybug.png`
+// let lastRideCenterX = null
+// let lastRideCenterY = null
+// const RIDE_CENTER_EPSILON_TILES = 0.25
+
 const ROLE = { NONE: 0, ROAD: 1, YBR: 2, PLAZA: 3 }
 
 const ANCHOR_CACHE_MAX = 8000
@@ -122,6 +143,78 @@ const anchorCacheSize = ref(0)
 const REALTIME_PATH = '/rt/'
 const PRESENCE_PANE = 'ewrmPresence'
 const PRESENCE_REGION_SIZE = 128
+
+
+let vehicleMarker = null
+let vehicleLastAngle = 0
+
+function vehicleLatLng(v) {
+  return L.latLng(-(Number(v.y) * WORLD.cellPx), Number(v.x) * WORLD.cellPx)
+}
+
+function vehicleAngleFromDir(dir) {
+const dx = Number(dir?.[0] ?? 0)
+const dy = Number(dir?.[1] ?? 0)
+
+if (dx > 0) return 90
+if (dx < 0) return -90
+if (dy > 0) return 180
+if (dy < 0) return 0
+
+
+  return vehicleLastAngle
+}
+
+function createVehicleIcon(angle = 0) {
+  const src = `${import.meta.env.BASE_URL}vehicles/ladybug.png`
+
+  return L.divIcon({
+    className: 'vehicle-icon-wrap',
+    html: `<img class="vehicle-icon" src="${src}" alt="Bus" style="transform: rotate(${angle}deg);" />`,
+    iconSize: [128, 128],
+    iconAnchor: [64, 64],
+  })
+}
+
+function updateVehicleMarker(vehicle) {
+if (!map || !vehicle?.visible || followVehicle.value) {
+  removeVehicleMarker()
+  return
+}
+
+  const ll = vehicleLatLng(vehicle)
+  const angle = vehicleAngleFromDir(vehicle.dir)
+  vehicleLastAngle = angle
+
+  if (!vehicleMarker) {
+    vehicleMarker = L.marker(ll, {
+      icon: createVehicleIcon(angle),
+      interactive: false,
+      keyboard: false,
+      zIndexOffset: 2000,
+    }).addTo(map)
+    return
+  }
+
+  const prev = vehicleMarker.getLatLng()
+
+  if (!prev || Math.abs(prev.lat - ll.lat) > 0.5 || Math.abs(prev.lng - ll.lng) > 0.5) {
+    vehicleMarker.setLatLng(ll)
+  }
+
+  const el = vehicleMarker.getElement()
+  const img = el?.querySelector('.vehicle-icon')
+  if (img) {
+    img.style.transform = `rotate(${angle}deg)`
+  }
+}
+
+function removeVehicleMarker() {
+  if (!vehicleMarker) return
+  vehicleMarker.remove()
+  vehicleMarker = null
+}
+
 
 const followVehicle = ref(false)
 
@@ -141,6 +234,12 @@ const vehicleTarget = reactive({
   visible: false,
 })
 
+const rideCamera = reactive({
+  x: 0.5,
+  y: 0.5,
+  active: false,
+})
+
 const VEHICLE_LERP = 0.18
 
 let lastVehicleRenderMs = 0
@@ -149,8 +248,8 @@ const builderMode = ref(false)
 const selectedTiles = ref([])
 const selectedSet = new Set()
 
-let lastRidePanMs = 0
-const RIDE_PAN_INTERVAL_MS = 80
+// let lastRidePanMs = 0
+// const RIDE_PAN_INTERVAL_MS = 120
 
 let socket = null
 let ownSocketId = null
@@ -787,6 +886,8 @@ function updateVehicleRender() {
 async function toggleRideMode() {
   if (followVehicle.value) {
     followVehicle.value = false
+    rideCamera.active = false
+    rideInfraLastMs = 0
     return
   }
 
@@ -804,19 +905,24 @@ async function toggleRideMode() {
   await refreshInfraMoveEnd()
 
   drawGrid()
+
+  rideCamera.x = vehicle.x
+  rideCamera.y = vehicle.y
+  rideCamera.active = true
+
+  rideInfraLastMs = 0
   followVehicle.value = true
 }
 
 function centerOnVehicle() {
   if (!map || !vehicle.visible) return
 
-  map.setView(
+  map.panTo(
     L.latLng(
       -(vehicle.y * WORLD.cellPx),
       vehicle.x * WORLD.cellPx
     ),
-    map.getZoom(),
-    { animate: false }
+    { animate: true, duration: 0.12, easeLinearity: 0.25 }
   )
 }
 
@@ -1342,6 +1448,9 @@ function rememberFetched(rect) {
 let infraMoveTimer = 0
 let infraMoveScheduled = false
 
+let rideInfraLastMs = 0
+let rideInfraInFlight = false
+
 async function refreshInfraForRect_UI(uiRect) {
   if (!map) return
   if (alreadyFetched(uiRect)) return
@@ -1410,6 +1519,41 @@ async function refreshInfraMoveEnd() {
     if (err?.name === 'AbortError') return
     hud.err = String(err?.message || err)
     console.error(err)
+  }
+}
+
+function rideInfraRect_UI() {
+  const vx = clamp(Math.floor(vehicle.x), 0, WORLD.cols - 1)
+  const vy = clamp(Math.floor(vehicle.y), 0, WORLD.rows - 1)
+
+  return {
+    xmin: clamp(vx - RIDE_INFRA_PAD, 0, WORLD.cols - 1),
+    xmax: clamp(vx + RIDE_INFRA_PAD, 0, WORLD.cols - 1),
+    ymin: clamp(vy - RIDE_INFRA_PAD, 0, WORLD.rows - 1),
+    ymax: clamp(vy + RIDE_INFRA_PAD, 0, WORLD.rows - 1),
+  }
+}
+
+async function requestInfraForRide() {
+  if (!map || !followVehicle.value || !vehicle.visible) return
+  if (rideInfraInFlight) return
+
+  const now = performance.now()
+  if ((now - rideInfraLastMs) < RIDE_INFRA_THROTTLE_MS) return
+  rideInfraLastMs = now
+  rideInfraInFlight = true
+
+  const ui = rideInfraRect_UI()
+
+  try {
+    await refreshInfraForRect_UI(ui)
+  } catch (err) {
+    if (err?.name !== 'AbortError') {
+      hud.err = String(err?.message || err)
+      console.error(err)
+    }
+  } finally {
+    rideInfraInFlight = false
   }
 }
 
@@ -1712,16 +1856,29 @@ function scheduleFrame() {
     updateCellPxLayer()
     updateAnchorCameraLayer()
     updateVehicleRender()
+    updateVehicleMarker(vehicle)
 
     if (followVehicle.value && vehicle.visible && map) {
+      if (!rideCamera.active) {
+        rideCamera.x = vehicle.x
+        rideCamera.y = vehicle.y
+        rideCamera.active = true
+      }
+
+      const cameraCatchup = 6
+      rideCamera.x += (vehicle.x - rideCamera.x) * (1 / cameraCatchup)
+      rideCamera.y += (vehicle.y - rideCamera.y) * (1 / cameraCatchup)
+
       map.setView(
         L.latLng(
-          -(vehicle.y * WORLD.cellPx),
-          vehicle.x * WORLD.cellPx
+          -(rideCamera.y * WORLD.cellPx),
+          rideCamera.x * WORLD.cellPx
         ),
         map.getZoom(),
         { animate: false }
       )
+
+      requestInfraForRide()
     }
 
     drawGrid()
@@ -1796,7 +1953,9 @@ function installDDTDragGating() {
 
   ddtPointerDownHandler = (e) => {
     if (followVehicle.value) {
-      map.dragging.disable()
+      followVehicle.value = false
+      rideCamera.active = false
+      rideInfraLastMs = 0
       return
     }
 
@@ -2221,6 +2380,7 @@ onMounted(async () => {
     isMoving = true
   })
 
+
   map.on('move', () => {
     if (followVehicle.value) return
     requestInfraWhileMoving()
@@ -2232,6 +2392,12 @@ onMounted(async () => {
     infraMoveScheduled = false
 
     setTimeout(() => { didMoveSinceDown = false }, 0)
+
+    if (followVehicle.value) {
+      isMoving = false
+      refreshPresenceForViewport()
+      return
+    }
 
     try {
       await refreshViewport()
@@ -2316,33 +2482,43 @@ onBeforeUnmount(() => {
   map?.remove()
   map = null
 
+removeVehicleMarker()
+
   anchorCache.clear()
 })
 
-const rideBusOverlayStyle = computed(() => {
-  const angle = Math.atan2(vehicle.dir[1], vehicle.dir[0]) * 180 / Math.PI
+// const rideBusOverlayStyle = computed(() => {
+//   const angle = Math.atan2(vehicle.dir[1], vehicle.dir[0]) * 180 / Math.PI
+//
+//   return {
+//     transform: `translate(-50%, -50%) rotate(${angle}deg)`,
+//   }
+// })
+//
+// const vehicleStyle = computed(() => {
+//   const cell = _cellPxLayer
+//   const px = camL.px0 + (vehicle.x - camL.xmin) * cell
+//   const py = camL.py0 + (vehicle.y - camL.ymin) * cell
+//
+//   const width = cell * 0.98
+//   const height = cell * 0.56
+//   const angle = Math.atan2(vehicle.dir[1], vehicle.dir[0]) * 180 / Math.PI
+//
+//   return {
+//     transform: `
+//       translate3d(${Math.round(px - width / 2)}px, ${Math.round(py - height / 2)}px, 0)
+//       rotate(${angle}deg)
+//     `,
+//     width: `${Math.round(width)}px`,
+//     height: `${Math.round(height)}px`,
+//   }
+// })
+
+const rideVehicleOverlayStyle = computed(() => {
+  const angle = vehicleAngleFromDir(vehicle.dir)
 
   return {
     transform: `translate(-50%, -50%) rotate(${angle}deg)`,
-  }
-})
-
-const vehicleStyle = computed(() => {
-  const cell = _cellPxLayer
-  const px = camL.px0 + (vehicle.x - camL.xmin) * cell
-  const py = camL.py0 + (vehicle.y - camL.ymin) * cell
-
-  const width = cell * 0.98
-  const height = cell * 0.56
-  const angle = Math.atan2(vehicle.dir[1], vehicle.dir[0]) * 180 / Math.PI
-
-  return {
-    transform: `
-      translate3d(${Math.round(px - width / 2)}px, ${Math.round(py - height / 2)}px, 0)
-      rotate(${angle}deg)
-    `,
-    width: `${Math.round(width)}px`,
-    height: `${Math.round(height)}px`,
   }
 })
 
@@ -2409,7 +2585,7 @@ const vehicleStyle = computed(() => {
   gap: 8px;
 }
 
-.vehicle {
+/* .vehicle {
   position: absolute;
   z-index: 200;
   pointer-events: none;
@@ -2520,5 +2696,38 @@ const vehicleStyle = computed(() => {
   box-shadow:
     0 0 8px rgba(255, 240, 160, 0.45),
     inset 0 -1px 0 rgba(0,0,0,0.18);
+} */
+
+:deep(.vehicle-icon-wrap) {
+  background: transparent;
+  border: 0;
+}
+
+:deep(.vehicle-icon) {
+  display: block;
+  width: 128px;
+  height: 128px;
+  pointer-events: none;
+  user-select: none;
+  transform-origin: 50% 50%;
+}
+
+.ride-vehicle-overlay {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 128px;
+  height: 128px;
+  z-index: 1200;
+  pointer-events: none;
+}
+
+.ride-vehicle-overlay__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  user-select: none;
+  transform-origin: 50% 50%;
 }
 </style>
