@@ -495,6 +495,19 @@ function clamp(v, min, max) {
 
 /* ===== landscape helpers ===== */
 
+const POP_TILE_COLORS = [
+  { base: '#28c7c9', shade: '#1eb0b8' }, // turquoise
+  { base: '#34b9e6', shade: '#2098c8' }, // blue
+  { base: '#8edb4f', shade: '#72c83d' }, // lime
+  { base: '#ff7f5f', shade: '#f2644e' }, // coral
+  { base: '#f95f72', shade: '#de4c6a' }, // hot coral
+  { base: '#b071d9', shade: '#935bc4' }, // purple
+  { base: '#4acfc3', shade: '#2bb8ad' }, // aqua
+]
+
+const POP_BASE_COLOR = '#2fc6c8'
+const POP_GRID_LINE = 'rgba(255,255,255,0.16)'
+
 function hash2D(x, y) {
   let h = x * 374761393 + y * 668265263
   h = (h ^ (h >> 13)) * 1274126177
@@ -502,208 +515,116 @@ function hash2D(x, y) {
   return (h >>> 0)
 }
 
-function terrainBlend(x, y) {
-  return (
-    Math.sin(x * 0.23) +
-    Math.sin(y * 0.19) +
-    Math.sin((x + y) * 0.11)
-  )
-}
+function popTileColor(x, y) {
+  const h = hash2D(x, y)
+  const r = h % 100
 
-function emptyTileKind(x, y) {
-  const macro = macroTerrain(x, y)
-  const band = terrainBand(x, y)
-  const blend = terrainBlend(x, y)
-  const h = (hash2D(x, y) + Math.floor(blend * 18)) % 100
-
-  if (macro === 'mountain') {
-    if (h < 60) return 'stone'
-    if (h < 85) return 'scrub'
-    return 'dirt'
+  // Mostly teal so the world feels coherent.
+  // Accent tiles create the pop-art energy.
+  if (r < 58) {
+    return {
+      base: POP_BASE_COLOR,
+      shade: '#25aeb5',
+    }
   }
 
-  if (macro === 'upland') {
-    if (h < 60) return 'scrub'
-    if (h < 85) return 'grass'
-    return 'stone'
-  }
-
-  if (macro === 'basin') {
-    if (h < 60) return 'grass'
-    if (h < 80) return 'scrub'
-    return 'dirt'
-  }
-
-  if (macro === 'coast') {
-    if (h < 70) return 'sand'
-    return 'stone'
-  }
-
-  if (band === 'grass') {
-    if (h < 70) return 'grass'
-    if (h < 90) return 'scrub'
-    return 'dirt'
-  }
-
-  if (band === 'scrub') {
-    if (h < 60) return 'scrub'
-    if (h < 80) return 'dirt'
-    return 'stone'
-  }
-
-  if (band === 'sand') {
-    if (h < 80) return 'sand'
-    return 'stone'
-  }
-
-  if (band === 'stone') {
-    if (h < 70) return 'stone'
-    return 'scrub'
-  }
-
-  return 'grass'
+  return POP_TILE_COLORS[(h >> 8) % POP_TILE_COLORS.length]
 }
 
 function drawEmptyLandscapeTile(ctx2d, x, y, px, py, cellPx) {
-  const kind = emptyTileKind(x, y)
+  const color = popTileColor(x, y)
 
-  if (kind === 'grass') {
-    ctx2d.fillStyle = 'rgba(38, 54, 42, 0.70)' // deep moss
-    ctx2d.fillRect(px, py, cellPx, cellPx)
+  ctx2d.fillStyle = color.base
+  ctx2d.fillRect(px, py, cellPx, cellPx)
 
-    ctx2d.strokeStyle = 'rgba(255,255,255,0.035)'
-    ctx2d.lineWidth = 1
-    ctx2d.strokeRect(px + 0.5, py + 0.5, cellPx - 1, cellPx - 1)
-
-  } else if (kind === 'dirt') {
-    ctx2d.fillStyle = 'rgba(64, 50, 42, 0.66)' // muted earth
-    ctx2d.fillRect(px, py, cellPx, cellPx)
-
-  } else if (kind === 'scrub') {
-    ctx2d.fillStyle = 'rgba(52, 60, 44, 0.64)' // olive dusk
-    ctx2d.fillRect(px, py, cellPx, cellPx)
-
-  } else if (kind === 'sand') {
-    ctx2d.fillStyle = 'rgba(86, 78, 56, 0.60)' // desaturated sand
-    ctx2d.fillRect(px, py, cellPx, cellPx)
-
-  } else {
-    ctx2d.fillStyle = 'rgba(44, 48, 54, 0.62)' // stone / slate
+  if (cellPx >= 32) {
+    const gradient = ctx2d.createLinearGradient(px, py, px + cellPx, py + cellPx)
+    gradient.addColorStop(0, 'rgba(255,255,255,0.10)')
+    gradient.addColorStop(1, 'rgba(0,0,0,0.08)')
+    ctx2d.fillStyle = gradient
     ctx2d.fillRect(px, py, cellPx, cellPx)
   }
 
-  if (cellPx >= 40) {
+  if (cellPx >= 48) {
+    ctx2d.fillStyle = 'rgba(255,255,255,0.08)'
+    ctx2d.fillRect(px, py, cellPx, Math.max(1, cellPx * 0.035))
+    ctx2d.fillRect(px, py, Math.max(1, cellPx * 0.035), cellPx)
+  }
+
+  ctx2d.strokeStyle = POP_GRID_LINE
+  ctx2d.lineWidth = 1
+  ctx2d.strokeRect(px + 0.5, py + 0.5, cellPx - 1, cellPx - 1)
+
+  if (cellPx >= 72) {
     const h = hash2D(x, y)
-    const count = 6 + (h % 8)
-    ctx2d.fillStyle = 'rgba(0,0,0,0.06)'
+    const count = 3 + (h % 4)
+
+    ctx2d.fillStyle = 'rgba(255,255,255,0.12)'
     for (let i = 0; i < count; i++) {
-      const dx = ((h >> (i % 16)) % 1000) / 1000
-      const dy = ((h >> ((i + 5) % 16)) % 1000) / 1000
-      ctx2d.fillRect(
-        px + dx * (cellPx - 3),
-        py + dy * (cellPx - 3),
-        2,
-        2
+      const dx = ((hash2D(x + i * 11, y) % 1000) / 1000)
+      const dy = ((hash2D(x, y + i * 17) % 1000) / 1000)
+
+      ctx2d.beginPath()
+      ctx2d.arc(
+        px + dx * cellPx,
+        py + dy * cellPx,
+        Math.max(1, cellPx * 0.01),
+        0,
+        Math.PI * 2
       )
+      ctx2d.fill()
     }
   }
 }
 
-function macroTerrain(x, y) {
-  const nx = x * 0.0015
-  const ny = y * 0.0015
-
-  const v =
-    Math.sin(nx * 0.9) +
-    Math.sin(ny * 0.7) +
-    Math.sin((nx + ny) * 0.6)
-
-  if (v > 1.3) return 'mountain'
-  if (v > 0.5) return 'upland'
-  if (v > -0.6) return 'plain'
-  if (v > -1.2) return 'basin'
-  return 'coast'
-}
-
-function terrainBand(x, y) {
-  const nx = x * 0.004
-  const ny = y * 0.004
-
-  const v =
-    Math.sin(nx * 1.7) +
-    Math.sin(ny * 1.3) +
-    Math.sin((nx + ny) * 1.1)
-
-  if (v < -1.2) return 'sand'
-  if (v < -0.2) return 'scrub'
-  if (v < 0.8) return 'grass'
-  return 'stone'
-}
-
 function emptyTileLandmark(x, y) {
   const h = hash2D(x, y) % 1000
-  if (h < 4) return 'pond'
-  if (h < 8) return 'ruin'
-  if (h < 14) return 'rocks'
-  if (h < 18) return 'shrub'
+
+  if (h < 3) return 'spark'
+  if (h < 6) return 'ring'
+  if (h < 10) return 'dotCluster'
   return null
 }
 
 function drawEmptyLandmark(ctx2d, x, y, px, py, cellPx) {
   const kind = emptyTileLandmark(x, y)
-  if (!kind || cellPx < 28) return
+  if (!kind) return
+  if (cellPx < 48) return
 
   const cx = px + cellPx * 0.5
   const cy = py + cellPx * 0.5
 
-  if (kind === 'pond') {
-    ctx2d.fillStyle = 'rgba(70, 95, 120, 0.35)'
-    ctx2d.strokeStyle = 'rgba(120, 150, 180, 0.25)'
+  if (kind === 'spark') {
+    ctx2d.strokeStyle = 'rgba(255,255,255,0.35)'
+    ctx2d.lineWidth = Math.max(1, cellPx * 0.025)
+
     ctx2d.beginPath()
-    ctx2d.ellipse(cx, cy, cellPx * 0.22, cellPx * 0.16, 0, 0, Math.PI * 2)
-    ctx2d.fill()
-    ctx2d.lineWidth = 1
+    ctx2d.moveTo(cx - cellPx * 0.12, cy)
+    ctx2d.lineTo(cx + cellPx * 0.12, cy)
+    ctx2d.moveTo(cx, cy - cellPx * 0.12)
+    ctx2d.lineTo(cx, cy + cellPx * 0.12)
     ctx2d.stroke()
     return
   }
 
-  if (kind === 'ruin') {
-    ctx2d.strokeStyle = 'rgba(110,110,110,0.25)'
-    ctx2d.lineWidth = Math.max(1, cellPx * 0.03)
-    ctx2d.strokeRect(
-      px + cellPx * 0.28,
-      py + cellPx * 0.28,
-      cellPx * 0.44,
-      cellPx * 0.44
-    )
-    ctx2d.strokeRect(
-      px + cellPx * 0.38,
-      py + cellPx * 0.38,
-      cellPx * 0.10,
-      cellPx * 0.10
-    )
+  if (kind === 'ring') {
+    ctx2d.strokeStyle = 'rgba(255,255,255,0.24)'
+    ctx2d.lineWidth = Math.max(1, cellPx * 0.025)
+    ctx2d.beginPath()
+    ctx2d.arc(cx, cy, cellPx * 0.16, 0, Math.PI * 2)
+    ctx2d.stroke()
     return
   }
 
-  if (kind === 'rocks') {
-    ctx2d.fillStyle = 'rgba(85,85,90,0.28)'
+  if (kind === 'dotCluster') {
+    ctx2d.fillStyle = 'rgba(255,255,255,0.24)'
+
     for (let i = 0; i < 4; i++) {
       const ox = ((hash2D(x + i, y) % 100) / 100 - 0.5) * cellPx * 0.24
       const oy = ((hash2D(x, y + i) % 100) / 100 - 0.5) * cellPx * 0.24
-      ctx2d.beginPath()
-      ctx2d.arc(cx + ox, cy + oy, cellPx * 0.06, 0, Math.PI * 2)
-      ctx2d.fill()
-    }
-    return
-  }
 
-  if (kind === 'shrub') {
-    ctx2d.fillStyle = 'rgba(60, 100, 70, 0.30)'
-    for (let i = 0; i < 3; i++) {
-      const ox = ((hash2D(x * 3 + i, y) % 100) / 100 - 0.5) * cellPx * 0.18
-      const oy = ((hash2D(x, y * 3 + i) % 100) / 100 - 0.5) * cellPx * 0.18
       ctx2d.beginPath()
-      ctx2d.arc(cx + ox, cy + oy, cellPx * 0.05, 0, Math.PI * 2)
+      ctx2d.arc(cx + ox, cy + oy, cellPx * 0.025, 0, Math.PI * 2)
       ctx2d.fill()
     }
   }
@@ -1436,6 +1357,7 @@ function renderInfraSvg() {
 
   const cellPxScreen = WORLD.cellPx * screenScale()
   const p0 = map.latLngToContainerPoint(tileTopLeftLatLng(ui.xmin, ui.ymin))
+  const world0 = map.latLngToContainerPoint(tileTopLeftLatLng(0, 0))
 
   const px0 = p0.x
   const py0 = p0.y
@@ -1443,6 +1365,47 @@ function renderInfraSvg() {
   const roadPath = tileRunPath(ROLE.ROAD, ui, px0, py0, cellPxScreen)
   const ybrPath = tileRunPath(ROLE.YBR, ui, px0, py0, cellPxScreen)
   const plazaPath = tileRunPath(ROLE.PLAZA, ui, px0, py0, cellPxScreen)
+
+  const mortar = Math.max(1, cellPxScreen * 0.012)
+  const brickW = Math.max(10, cellPxScreen * 0.24)
+  const brickH = Math.max(6, cellPxScreen * 0.11)
+  const stepX = brickW + mortar
+  const stepY = brickH + mortar
+  const patternW = stepX * 2
+  const patternH = stepY * 2
+
+  const brickRx = Math.max(1.5, brickH * 0.14)
+  const brickStroke = Math.max(0.6, brickH * 0.045)
+  const highlightInset = Math.max(1, brickH * 0.10)
+
+  const patternOffsetX = world0.x % patternW
+  const patternOffsetY = world0.y % patternH
+
+  const brickRect = (x, y) => `
+    <g>
+      <rect
+        x="${x}"
+        y="${y}"
+        width="${brickW}"
+        height="${brickH}"
+        rx="${brickRx}"
+        ry="${brickRx}"
+        fill="#ffc53a"
+        stroke="#c98900"
+        stroke-width="${brickStroke}"
+      />
+      <rect
+        x="${x + highlightInset}"
+        y="${y + highlightInset}"
+        width="${brickW - (highlightInset * 2)}"
+        height="${Math.max(1, brickH * 0.12)}"
+        rx="${Math.max(1, brickRx * 0.45)}"
+        ry="${Math.max(1, brickRx * 0.45)}"
+        fill="rgba(255,255,255,0.10)"
+        stroke="none"
+      />
+    </g>
+  `
 
   host.innerHTML = `
     <svg
@@ -1452,11 +1415,59 @@ function renderInfraSvg() {
       width="${viewportW}"
       height="${viewportH}"
       preserveAspectRatio="none"
-      shape-rendering="crispEdges"
+      shape-rendering="geometricPrecision"
     >
-      ${roadPath ? `<path d="${roadPath}" fill="#2e543a" />` : ''}
-      ${plazaPath ? `<path d="${plazaPath}" fill="rgba(90,90,90,0.18)" />` : ''}
-      ${ybrPath ? `<path d="${ybrPath}" fill="#ffd700" />` : ''}
+      <defs>
+        <pattern
+          id="ybr-pattern"
+          x="0"
+          y="0"
+          width="${patternW}"
+          height="${patternH}"
+          patternUnits="userSpaceOnUse"
+          patternTransform="translate(${patternOffsetX}, ${patternOffsetY})"
+        >
+          <rect width="${patternW}" height="${patternH}" fill="#d99500" />
+
+          ${brickRect(0, 0)}
+          ${brickRect(stepX, 0)}
+
+          ${brickRect(-stepX / 2, stepY)}
+          ${brickRect(stepX / 2, stepY)}
+          ${brickRect(stepX * 1.5, stepY)}
+        </pattern>
+
+        ${
+          ybrPath
+            ? `
+              <clipPath id="ybr-clip">
+                <path d="${ybrPath}" />
+              </clipPath>
+            `
+            : ''
+        }
+      </defs>
+
+      ${roadPath ? `<path d="${roadPath}" fill="#31404a" />` : ''}
+      ${plazaPath ? `<path d="${plazaPath}" fill="rgba(255,255,255,0.22)" />` : ''}
+
+      ${
+        ybrPath
+          ? `
+            <path d="${ybrPath}" fill="#d99500" />
+
+            <g clip-path="url(#ybr-clip)">
+              <rect
+                x="${-patternW}"
+                y="${-patternH}"
+                width="${viewportW + patternW * 2}"
+                height="${viewportH + patternH * 2}"
+                fill="url(#ybr-pattern)"
+              />
+            </g>
+          `
+          : ''
+      }
     </svg>
   `
 }
@@ -2660,7 +2671,7 @@ const rideVehicleOverlayStyle = computed(() => {
 <style scoped>
 .wrap { position: relative; width: 100vw; height: 100vh; }
 .map { width: 100%; height: 100%; }
-:deep(.leaflet-container) { background: #141618; }
+:deep(.leaflet-container) { background: #2fc6c8; }
 
 .grid-canvas {
   position: absolute;
