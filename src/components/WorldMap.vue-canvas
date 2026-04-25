@@ -2,8 +2,6 @@
   <div class="wrap">
     <div ref="mapEl" class="map"></div>
 
-    <div ref="infraLayerEl" class="infra-layer"></div>
-
     <canvas ref="gridCanvasEl" class="grid-canvas"></canvas>
 
     <div ref="anchorLayerEl" class="anchor-layer">
@@ -267,7 +265,6 @@ const selfPresence = reactive({
 })
 
 const mapEl = ref(null)
-const infraLayerEl = ref(null)
 const gridCanvasEl = ref(null)
 const anchorLayerEl = ref(null)
 
@@ -1140,52 +1137,7 @@ function onTileClick(t, event) {
 
 /* ===== leaflet pane mounting ===== */
 
-const INFRA_PANE = 'ewrmInfra'
 const ANCHOR_PANE = 'ewrmAnchors'
-
-
-function ensureInfraPane() {
-  if (!map) return null
-  const pane = map.getPane(INFRA_PANE) || map.createPane(INFRA_PANE)
-  pane.style.zIndex = '500'
-  pane.style.pointerEvents = 'none'
-  return pane
-}
-
-function mountInfraIntoPane() {
-  if (!map) return
-  const el = infraLayerEl.value
-  if (!el) return
-
-  const pane = ensureInfraPane()
-  if (!pane) return
-
-  if (el.parentNode !== pane) pane.appendChild(el)
-
-  el.style.position = 'absolute'
-  el.style.left = '0'
-  el.style.top = '0'
-  el.style.pointerEvents = 'none'
-
-  updateInfraLayerPosition()
-}
-
-function updateInfraLayerPosition() {
-  if (!map) return
-
-  const el = infraLayerEl.value
-  const host = mapEl.value
-  if (!el || !host) return
-
-  const viewportW = Math.round(host.clientWidth || 0)
-  const viewportH = Math.round(host.clientHeight || 0)
-
-  const layerPoint = map.containerPointToLayerPoint([0, 0])
-
-  el.style.width = `${viewportW}px`
-  el.style.height = `${viewportH}px`
-  el.style.transform = `translate3d(${Math.round(layerPoint.x)}px, ${Math.round(layerPoint.y)}px, 0)`
-}
 
 function mountAnchorsIntoPane() {
   if (!map) return
@@ -1388,88 +1340,6 @@ function makeGrassPattern() {
   return g.createPattern(c, 'repeat')
 }
 
-
-/* ===== infra SVG layer ===== */
-
-const INFRA_SVG_PAD = 3
-let infraSvgRefreshRaf = 0
-
-function tileRunPath(role, uiRect, px0, py0, cellPxScreen) {
-  let d = ''
-
-  for (let y = uiRect.ymin; y <= uiRect.ymax; y++) {
-    const rowBase = y * WORLD.cols
-    let x = uiRect.xmin
-
-    while (x <= uiRect.xmax) {
-      while (x <= uiRect.xmax && infraGrid[rowBase + x] !== role) x++
-      if (x > uiRect.xmax) break
-
-      const start = x
-      while (x <= uiRect.xmax && infraGrid[rowBase + x] === role) x++
-
-      const len = x - start
-
-      const px = px0 + (start - uiRect.xmin) * cellPxScreen
-      const py = py0 + (y - uiRect.ymin) * cellPxScreen
-      const w = len * cellPxScreen
-      const h = cellPxScreen
-
-      d += `M${px} ${py}H${px + w}V${py + h}H${px}Z`
-    }
-  }
-
-  return d
-}
-
-function renderInfraSvg() {
-  const host = infraLayerEl.value
-  if (!host || !map) return
-
-  updateInfraLayerPosition()
-
-  const viewportW = Math.round(mapEl.value?.clientWidth || 0)
-  const viewportH = Math.round(mapEl.value?.clientHeight || 0)
-  if (!viewportW || !viewportH) return
-
-  const ui = tileBoundsWithPad_UI(INFRA_SVG_PAD)
-
-  const cellPxScreen = WORLD.cellPx * screenScale()
-  const p0 = map.latLngToContainerPoint(tileTopLeftLatLng(ui.xmin, ui.ymin))
-
-  const px0 = p0.x
-  const py0 = p0.y
-
-  const roadPath = tileRunPath(ROLE.ROAD, ui, px0, py0, cellPxScreen)
-  const ybrPath = tileRunPath(ROLE.YBR, ui, px0, py0, cellPxScreen)
-  const plazaPath = tileRunPath(ROLE.PLAZA, ui, px0, py0, cellPxScreen)
-
-  host.innerHTML = `
-    <svg
-      class="infra-svg"
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 ${viewportW} ${viewportH}"
-      width="${viewportW}"
-      height="${viewportH}"
-      preserveAspectRatio="none"
-      shape-rendering="crispEdges"
-    >
-      ${roadPath ? `<path d="${roadPath}" fill="#2e543a" />` : ''}
-      ${plazaPath ? `<path d="${plazaPath}" fill="rgba(90,90,90,0.18)" />` : ''}
-      ${ybrPath ? `<path d="${ybrPath}" fill="#ffd700" />` : ''}
-    </svg>
-  `
-}
-
-function requestInfraSvgRefresh() {
-  if (infraSvgRefreshRaf) return
-  infraSvgRefreshRaf = requestAnimationFrame(() => {
-    infraSvgRefreshRaf = 0
-    renderInfraSvg()
-  })
-}
-
-
 /* ===== anchors ===== */
 
 function tileStyle(t) {
@@ -1657,7 +1527,6 @@ async function refreshInfraForRect_UI(uiRect) {
   }
 
   rememberFetched(uiRect)
-  requestInfraSvgRefresh()
 }
 
 function requestInfraWhileMoving() {
@@ -1936,6 +1805,7 @@ function drawGrid() {
     grassPattern.setTransform(new DOMMatrix().translate(px0, py0))
   }
 
+  const useTextures = cellPxScreen >= 40
 
   for (let y = ymin; y <= ymax; y++) {
     const py = py0 + (y - ymin) * cellPxScreen
@@ -1948,6 +1818,66 @@ function drawGrid() {
       if (role === ROLE.NONE) {
         drawEmptyLandscapeTile(ctx, x, y, px, py, cellPxScreen)
         drawEmptyLandmark(ctx, x, y, px, py, cellPxScreen)
+        continue
+      }
+
+      if (role === ROLE.YBR) {
+        const s = cellPxScreen
+        const BORDER = Math.min(48 * screenScale(), s * 0.32)
+
+        const hasLeft  = x > 0 && infraGrid[idxOf(x - 1, y)] === ROLE.YBR
+        const hasRight = x < WORLD.cols - 1 && infraGrid[idxOf(x + 1, y)] === ROLE.YBR
+        const hasUp    = y > 0 && infraGrid[idxOf(x, y - 1)] === ROLE.YBR
+        const hasDown  = y < WORLD.rows - 1 && infraGrid[idxOf(x, y + 1)] === ROLE.YBR
+
+        // base YBR
+        ctx.fillStyle = 'rgba(210, 170, 40, 0.55)'
+        ctx.fillRect(px, py, s, s)
+
+        // optional inner polish
+        if (s > BORDER * 2) {
+          ctx.fillStyle = 'rgba(255, 210, 90, 0.08)'
+          ctx.fillRect(px + BORDER, py + BORDER, s - BORDER * 2, s - BORDER * 2)
+        }
+
+        // outer border only where edge is exposed
+        // ctx.fillStyle = 'rgba(55, 32, 14, 0.95)'
+        ctx.fillStyle = 'rgb(20, 10, 5)'
+
+        if (!hasUp) {
+          ctx.fillRect(px, py, s, BORDER)
+        }
+        if (!hasDown) {
+          ctx.fillRect(px, py + s - BORDER, s, BORDER)
+        }
+        if (!hasLeft) {
+          ctx.fillRect(px, py, BORDER, s)
+        }
+        if (!hasRight) {
+          ctx.fillRect(px + s - BORDER, py, BORDER, s)
+        }
+
+        if (useTextures && brickPattern) {
+          ctx.fillStyle = brickPattern
+          ctx.globalAlpha = 0.85
+          ctx.fillRect(px, py, s, s)
+          ctx.globalAlpha = 1
+        }
+      } else if (role === ROLE.ROAD) {
+        ctx.fillStyle = 'rgba(46, 84, 58, 0.85)'
+        ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+
+        if (useTextures && grassPattern) {
+          ctx.fillStyle = grassPattern
+          ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
+        }
+
+        ctx.strokeStyle = 'rgba(0,0,0,0.06)'
+        ctx.lineWidth = 1
+        ctx.strokeRect(px + 0.5, py + 0.5, cellPxScreen - 1, cellPxScreen - 1)
+      } else if (role === ROLE.PLAZA) {
+        ctx.fillStyle = 'rgba(90, 90, 90, 0.10)'
+        ctx.fillRect(px, py, cellPxScreen, cellPxScreen)
       }
     }
   }
@@ -2007,7 +1937,6 @@ function scheduleFrame() {
     }
 
     drawGrid()
-    requestInfraSvgRefresh()
     updateHud()
 
     scheduleFrame()
@@ -2484,7 +2413,6 @@ onMounted(async () => {
   map.setMaxBounds(bounds)
   map.setView(L.latLng(-worldHeight / 2, worldWidth / 2), lockedZoom, { animate: false })
 
-  mountInfraIntoPane()
   mountAnchorsIntoPane()
   ensurePresencePane()
   initRealtime()
@@ -2495,7 +2423,6 @@ onMounted(async () => {
     updateCellPxLayer()
     updateAnchorCameraLayer()
     drawGrid()
-    requestInfraSvgRefresh()
     updateHud()
   })
   ro.observe(mapEl.value)
@@ -2510,7 +2437,6 @@ onMounted(async () => {
 
 
   map.on('move', () => {
-    requestInfraSvgRefresh()
     if (followVehicle.value) return
     requestInfraWhileMoving()
   })
@@ -2524,7 +2450,6 @@ onMounted(async () => {
 
     if (followVehicle.value) {
       isMoving = false
-      requestInfraSvgRefresh()
       refreshPresenceForViewport()
       return
     }
@@ -2535,7 +2460,6 @@ onMounted(async () => {
       await refreshActiveCellIfNeeded()
     } finally {
       isMoving = false
-      requestInfraSvgRefresh()
       refreshPresenceForViewport()
     }
   })
@@ -2581,7 +2505,6 @@ onMounted(async () => {
     map.invalidateSize({ pan: false })
     updateCellPxLayer()
     handleRoutePipeline().catch(console.error)
-    requestInfraSvgRefresh()
     scheduleFrame()
   })
 })
@@ -2605,7 +2528,6 @@ onBeforeUnmount(() => {
   infraMoveScheduled = false
 
   if (raf) cancelAnimationFrame(raf)
-  if (infraSvgRefreshRaf) cancelAnimationFrame(infraSvgRefreshRaf)
 
   ro?.disconnect()
 
@@ -2668,21 +2590,6 @@ const rideVehicleOverlayStyle = computed(() => {
   z-index: 10;
   width: 100%;
   height: 100%;
-  pointer-events: none;
-}
-
-.infra-layer {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 15;
-}
-
-:deep(.infra-svg) {
-  display: block;
-  overflow: visible;
   pointer-events: none;
 }
 

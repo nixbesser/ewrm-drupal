@@ -1162,29 +1162,15 @@ function mountInfraIntoPane() {
 
   if (el.parentNode !== pane) pane.appendChild(el)
 
+  const worldW = WORLD.cols * WORLD.cellPx
+  const worldH = WORLD.rows * WORLD.cellPx
+
   el.style.position = 'absolute'
   el.style.left = '0'
   el.style.top = '0'
+  el.style.width = `${worldW}px`
+  el.style.height = `${worldH}px`
   el.style.pointerEvents = 'none'
-
-  updateInfraLayerPosition()
-}
-
-function updateInfraLayerPosition() {
-  if (!map) return
-
-  const el = infraLayerEl.value
-  const host = mapEl.value
-  if (!el || !host) return
-
-  const viewportW = Math.round(host.clientWidth || 0)
-  const viewportH = Math.round(host.clientHeight || 0)
-
-  const layerPoint = map.containerPointToLayerPoint([0, 0])
-
-  el.style.width = `${viewportW}px`
-  el.style.height = `${viewportH}px`
-  el.style.transform = `translate3d(${Math.round(layerPoint.x)}px, ${Math.round(layerPoint.y)}px, 0)`
 }
 
 function mountAnchorsIntoPane() {
@@ -1394,7 +1380,8 @@ function makeGrassPattern() {
 const INFRA_SVG_PAD = 3
 let infraSvgRefreshRaf = 0
 
-function tileRunPath(role, uiRect, px0, py0, cellPxScreen) {
+function tileRunPath(role, uiRect) {
+  const size = WORLD.cellPx
   let d = ''
 
   for (let y = uiRect.ymin; y <= uiRect.ymax; y++) {
@@ -1407,13 +1394,12 @@ function tileRunPath(role, uiRect, px0, py0, cellPxScreen) {
 
       const start = x
       while (x <= uiRect.xmax && infraGrid[rowBase + x] === role) x++
-
       const len = x - start
 
-      const px = px0 + (start - uiRect.xmin) * cellPxScreen
-      const py = py0 + (y - uiRect.ymin) * cellPxScreen
-      const w = len * cellPxScreen
-      const h = cellPxScreen
+      const px = start * size
+      const py = y * size
+      const w = len * size
+      const h = size
 
       d += `M${px} ${py}H${px + w}V${py + h}H${px}Z`
     }
@@ -1426,37 +1412,52 @@ function renderInfraSvg() {
   const host = infraLayerEl.value
   if (!host || !map) return
 
-  updateInfraLayerPosition()
-
-  const viewportW = Math.round(mapEl.value?.clientWidth || 0)
-  const viewportH = Math.round(mapEl.value?.clientHeight || 0)
-  if (!viewportW || !viewportH) return
-
+  const worldW = WORLD.cols * WORLD.cellPx
+  const worldH = WORLD.rows * WORLD.cellPx
   const ui = tileBoundsWithPad_UI(INFRA_SVG_PAD)
 
-  const cellPxScreen = WORLD.cellPx * screenScale()
-  const p0 = map.latLngToContainerPoint(tileTopLeftLatLng(ui.xmin, ui.ymin))
-
-  const px0 = p0.x
-  const py0 = p0.y
-
-  const roadPath = tileRunPath(ROLE.ROAD, ui, px0, py0, cellPxScreen)
-  const ybrPath = tileRunPath(ROLE.YBR, ui, px0, py0, cellPxScreen)
-  const plazaPath = tileRunPath(ROLE.PLAZA, ui, px0, py0, cellPxScreen)
+  const roadPath = tileRunPath(ROLE.ROAD, ui)
+  const ybrPath = tileRunPath(ROLE.YBR, ui)
+  const plazaPath = tileRunPath(ROLE.PLAZA, ui)
 
   host.innerHTML = `
     <svg
       class="infra-svg"
       xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 ${viewportW} ${viewportH}"
-      width="${viewportW}"
-      height="${viewportH}"
+      viewBox="0 0 ${worldW} ${worldH}"
+      width="${worldW}"
+      height="${worldH}"
       preserveAspectRatio="none"
+      aria-hidden="true"
       shape-rendering="crispEdges"
     >
-      ${roadPath ? `<path d="${roadPath}" fill="#2e543a" />` : ''}
-      ${plazaPath ? `<path d="${plazaPath}" fill="rgba(90,90,90,0.18)" />` : ''}
-      ${ybrPath ? `<path d="${ybrPath}" fill="#ffd700" />` : ''}
+      <defs>
+        <pattern id="ewrm-road-pattern" width="128" height="128" patternUnits="userSpaceOnUse">
+          <rect width="128" height="128" fill="rgba(46,84,58,0.90)" />
+          <g stroke="rgba(84,120,92,0.22)" stroke-width="2">
+            <path d="M8 22L26 6M32 48L52 28M76 30L96 12M16 98L36 76M86 104L110 82" />
+          </g>
+          <g fill="rgba(22,40,26,0.16)">
+            <rect x="18" y="18" width="3" height="10" rx="1" />
+            <rect x="48" y="72" width="3" height="12" rx="1" />
+            <rect x="82" y="48" width="3" height="11" rx="1" />
+            <rect x="110" y="28" width="3" height="9" rx="1" />
+          </g>
+        </pattern>
+
+        <pattern id="ewrm-ybr-pattern" width="60" height="32" patternUnits="userSpaceOnUse">
+          <rect width="60" height="32" fill="#d2aa28" />
+          <rect x="0" y="0" width="29" height="15" fill="#f6d36b" />
+          <rect x="31" y="0" width="29" height="15" fill="#e1b43b" />
+          <rect x="15" y="17" width="29" height="15" fill="#efc95a" />
+          <path d="M0 16H60" stroke="rgba(92,67,9,0.20)" stroke-width="1" />
+          <path d="M30 0V16M15 16V32M45 16V32" stroke="rgba(92,67,9,0.16)" stroke-width="1" />
+        </pattern>
+      </defs>
+
+      ${roadPath ? `<path d="${roadPath}" fill="url(#ewrm-road-pattern)" opacity="0.98" />` : ''}
+      ${ybrPath ? `<path d="${ybrPath}" fill="url(#ewrm-ybr-pattern)" />` : ''}
+      ${plazaPath ? `<path d="${plazaPath}" fill="rgba(90,90,90,0.14)" />` : ''}
     </svg>
   `
 }
@@ -2673,9 +2674,8 @@ const rideVehicleOverlayStyle = computed(() => {
 
 .infra-layer {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  left: 0;
+  top: 0;
   pointer-events: none;
   z-index: 15;
 }

@@ -1,0 +1,1669 @@
+<template>
+  <div class="wrap">
+    <div ref="mapEl" class="map"></div>
+
+    <div ref="infraLayerEl" class="infra-layer"></div>
+
+    <div ref="anchorLayerEl" class="anchor-layer">
+      <div
+        v-for="t in renderAnchors"
+        :key="`${t.x}:${t.y}`"
+        v-memo="[
+          t.x, t.y, t.w, t.h, t.cover, t.flippable, t.ddt,
+          isFlipped(t), isActive(t), tabFor(t),
+          tabsForTile(t)
+        ]"
+        class="tile-shell"
+        :data-ddt="t.ddt ? '1' : '0'"
+        :class="{ 'is-active': isActive(t), 'is-flipped': isFlipped(t) }"
+        :style="tileStyle(t)"
+        @click.stop="onTileClick(t, $event)"
+      >
+        <TileAnchor
+          :tile="t"
+          :flipped="isFlipped(t)"
+          :cell="isActive(t) ? activeCell : null"
+          :tab="tabFor(t)"
+          :tabs="tabsForTile(t)"
+          @tab-change="onTabChange(t, $event)"
+          @request-cover="flippedKey = null"
+        />
+      </div>
+    </div>
+
+    <div class="hud">
+      <div><strong>EWRM HUD</strong></div>
+      <div>route: {{ hud.route }}</div>
+      <div>tileBounds: {{ hud.tb }}</div>
+      <div>centerTile: {{ hud.ct }}</div>
+      <div>anchors: {{ anchors.length }}</div>
+      <div>anchorCache: {{ anchorCacheSize }}</div>
+      <div>pendingNavSource: {{ hud.nav }}</div>
+      <div>lastErr: {{ hud.err }}</div>
+      <div>infra(nonzero): {{ infraCount }}</div>
+      <div>activeCell: {{ activeCell ? 'yes' : 'no' }}</div>
+      <div>users: {{ presenceCount }}</div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import L from 'leaflet'
+import { io } from 'socket.io-client'
+import { ref, onMounted, onBeforeUnmount, watch, reactive, computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { fetchViewport, fetchCell, resolveObject, fetchInfra } from '../api/worldApi'
+import TileAnchor from './TileAnchor.vue'
+
+/**
+ * BEST UX SETTINGS
+ * - Render on every move via RAF (drag + inertia)
+ * - Fetch infra progressively while moving (throttled + deduped)
+ */
+const WORLD = { z: 10, cols: 1024, rows: 1024, cellPx: 256 }
+const BACKEND_Y_IS_BOTTOM_ORIGIN = false
+
+// Fetch radii (pads):
+const PAD_ANCHORS = 12
+const PAD_DRAW = 2
+
+// Role encoding (1 byte per tile)
+const ROLE = { NONE: 0, ROAD: 1, YBR: 2, PLAZA: 3 }
+
+// Anchor cache hygiene (future-proof)
+const ANCHOR_CACHE_MAX = 8000
+const ANCHOR_CACHE_TTL_MS = 30 * 60 * 1000
+const ANCHOR_CACHE_PRUNE_EVERY = 25
+const anchorCacheSize = ref(0)
+
+const REALTIME_PATH = '/rt/'
+const PRESENCE_PANE = 'ewrmPresence'
+const PRESENCE_RADIUS = 18
+const PRESENCE_REGION_SIZE = 128
+
+const PRESENCE_STYLE_SELF = {
+  pane: PRESENCE_PANE,
+  radius: PRESENCE_RADIUS,
+  color: '#111111',
+  fillColor: '#ff5a36',
+  fillOpacity: 0.95,
+  weight: 1,
+  opacity: 1,
+}
+
+const PRESENCE_STYLE_OTHER = {
+  pane: PRESENCE_PANE,
+  radius: PRESENCE_RADIUS,
+  color: '#111111',
+  fillColor: '#00b7ff',
+  fillOpacity: 0.9,
+  weight: 1,
+  opacity: 1,
+}
+
+let socket = null
+let ownSocketId = null
+let lastViewportRegions = []
+const presenceMarkers = new Map() // socketId -> L.circleMarker
+const presenceCount = ref(0)
+
+const selfPresence = reactive({
+  x: null,
+  y: null,
+  ox: 0.5,
+  oy: 0.5,
+})
+
+const mapEl = ref(null)
+const infraLayerEl = ref(null)
+const anchorLayerEl = ref(null)
+
+const anchors = ref([])
+
+// Anchor cache: key "x:y" (UI coords) -> anchor object {.., lastSeenMs}
+const anchorCache = new Map()
+let anchorPruneCounter = 0
+
+let map = null
+let raf = 0
+let viewportAbort = null
+
+const route = useRoute()
+const router = useRouter()
+
+const flippedKey = ref(null)
+
+// --- Tab registry (easy to extend) ---
+const TAB_SETS = {
+  song: [
+    { id: 'cover', label: 'Cover' },
+    { id: 'embed', label: 'Media' },
+    { id: 'description', label: 'Info' },
+    { id: 'links', label: 'Links' },
+  ],
+  default: [
+    { id: 'cover', label: 'Cover' },
+    { id: 'description', label: 'Info' },
+    { id: 'links', label: 'Links' },
+  ],
+}
+
+function bundleForTile(t) {
+  if (isActive(t) && activeCell.value?.object?.bundle) return activeCell.value.object.bundle
+  return t?.object?.bundle || 'default'
+}
+
+function tabsForTile(t) {
+  const b = bundleForTile(t)
+  return TAB_SETS[b] || TAB_SETS.default
+}
+
+// Persist selected tab per tile key ("x:y")
+const tabByKey = reactive(Object.create(null))
+function keyForTile(t) { return `${t.x}:${t.y}` }
+
+function tabFor(t) {
+  const key = keyForTile(t)
+  const tabs = tabsForTile(t)
+  return tabByKey[key] || tabs[0].id
+}
+
+function onTabChange(t, tab) {
+  if (tab === 'cover') return
+  tabByKey[keyForTile(t)] = tab
+}
+
+// Keep the active anchor mounted even if it falls out of viewport anchor list
+const pinnedAnchor = ref(null)
+
+// Merge anchors + pinnedAnchor (dedupe by x:y)
+const renderAnchors = computed(() => {
+  const out = []
+  const seen = new Set()
+
+  for (const a of anchors.value) {
+    const k = keyForTile(a)
+    if (!seen.has(k)) {
+      seen.add(k)
+      out.push(a)
+    }
+  }
+
+  const p = pinnedAnchor.value
+  if (p) {
+    const k = keyForTile(p)
+    if (!seen.has(k)) out.push(p)
+  }
+
+  return out
+})
+
+// 1024*1024 = 1,048,576 bytes (~1MB)
+const infraGrid = new Uint8Array(WORLD.cols * WORLD.rows)
+const infraCount = ref(0)
+
+// ACTIVE CELL payload
+const activeCell = ref(null)
+let cellAbort = null
+
+let hasInitialized = false
+let didMoveSinceDown = false
+let pendingNavSource = null
+let isMoving = false
+
+const hud = reactive({
+  tb: '—',
+  ct: '—',
+  route: '—',
+  err: '—',
+  nav: '—',
+})
+
+function screenScale() {
+  return map ? map.getZoomScale(map.getZoom(), 0) : 1
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v))
+}
+
+/* ===== landscape helpers ===== */
+
+function hash2D(x, y) {
+  let h = x * 374761393 + y * 668265263
+  h = (h ^ (h >> 13)) * 1274126177
+  h = h ^ (h >> 16)
+  return (h >>> 0)
+}
+
+function terrainBlend(x, y) {
+  const n =
+    Math.sin(x * 0.23) +
+    Math.sin(y * 0.19) +
+    Math.sin((x + y) * 0.11)
+
+  return n
+}
+
+function emptyTileKind(x, y) {
+  const macro = macroTerrain(x, y)
+  const band = terrainBand(x, y)
+  const blend = terrainBlend(x, y)
+
+  const h = (hash2D(x, y) + Math.floor(blend * 18)) % 100
+
+  if (macro === 'mountain') {
+    if (h < 60) return 'stone'
+    if (h < 85) return 'scrub'
+    return 'dirt'
+  }
+
+  if (macro === 'upland') {
+    if (h < 60) return 'scrub'
+    if (h < 85) return 'grass'
+    return 'stone'
+  }
+
+  if (macro === 'basin') {
+    if (h < 60) return 'grass'
+    if (h < 80) return 'scrub'
+    return 'dirt'
+  }
+
+  if (macro === 'coast') {
+    if (h < 70) return 'sand'
+    return 'stone'
+  }
+
+  if (band === 'grass') {
+    if (h < 70) return 'grass'
+    if (h < 90) return 'scrub'
+    return 'dirt'
+  }
+
+  if (band === 'scrub') {
+    if (h < 60) return 'scrub'
+    if (h < 80) return 'dirt'
+    return 'stone'
+  }
+
+  if (band === 'sand') {
+    if (h < 80) return 'sand'
+    return 'stone'
+  }
+
+  if (band === 'stone') {
+    if (h < 70) return 'stone'
+    return 'scrub'
+  }
+
+  return 'grass'
+}
+
+function drawEmptyLandscapeTile(ctx, x, y, px, py, cellPx) {
+  const kind = emptyTileKind(x, y)
+
+  if (kind === 'grass') {
+    ctx.fillStyle = 'rgba(170, 186, 135, 0.32)'
+    ctx.fillRect(px, py, cellPx, cellPx)
+  } else if (kind === 'dirt') {
+    ctx.fillStyle = 'rgba(160, 136, 102, 0.28)'
+    ctx.fillRect(px, py, cellPx, cellPx)
+  } else if (kind === 'scrub') {
+    ctx.fillStyle = 'rgba(150, 165, 120, 0.24)'
+    ctx.fillRect(px, py, cellPx, cellPx)
+  } else if (kind === 'sand') {
+    ctx.fillStyle = 'rgba(196, 180, 126, 0.22)'
+    ctx.fillRect(px, py, cellPx, cellPx)
+  } else {
+    ctx.fillStyle = 'rgba(145, 145, 145, 0.16)'
+    ctx.fillRect(px, py, cellPx, cellPx)
+  }
+
+  if (cellPx >= 40) {
+    const h = hash2D(x, y)
+    const count = 6 + (h % 8)
+    ctx.fillStyle = 'rgba(0,0,0,0.06)'
+    for (let i = 0; i < count; i++) {
+      const dx = ((h >> (i % 16)) % 1000) / 1000
+      const dy = ((h >> ((i + 5) % 16)) % 1000) / 1000
+      ctx.fillRect(
+        px + dx * (cellPx - 3),
+        py + dy * (cellPx - 3),
+        2,
+        2
+      )
+    }
+  }
+}
+
+function macroTerrain(x, y) {
+  const nx = x * 0.0015
+  const ny = y * 0.0015
+
+  const v =
+    Math.sin(nx * 0.9) +
+    Math.sin(ny * 0.7) +
+    Math.sin((nx + ny) * 0.6)
+
+  if (v > 1.3) return 'mountain'
+  if (v > 0.5) return 'upland'
+  if (v > -0.6) return 'plain'
+  if (v > -1.2) return 'basin'
+  return 'coast'
+}
+
+function terrainBand(x, y) {
+  const nx = x * 0.004
+  const ny = y * 0.004
+
+  const v =
+    Math.sin(nx * 1.7) +
+    Math.sin(ny * 1.3) +
+    Math.sin((nx + ny) * 1.1)
+
+  if (v < -1.2) return 'sand'
+  if (v < -0.2) return 'scrub'
+  if (v < 0.8) return 'grass'
+  return 'stone'
+}
+
+function emptyTileLandmark(x, y) {
+  const h = hash2D(x, y) % 1000
+  if (h < 4) return 'pond'
+  if (h < 8) return 'ruin'
+  if (h < 14) return 'rocks'
+  if (h < 18) return 'shrub'
+  return null
+}
+
+function drawEmptyLandmark(ctx, x, y, px, py, cellPx) {
+  const kind = emptyTileLandmark(x, y)
+  if (!kind) return
+  if (cellPx < 28) return
+
+  const cx = px + cellPx * 0.5
+  const cy = py + cellPx * 0.5
+
+  if (kind === 'pond') {
+    ctx.fillStyle = 'rgba(110, 150, 180, 0.32)'
+    ctx.beginPath()
+    ctx.ellipse(cx, cy, cellPx * 0.22, cellPx * 0.16, 0, 0, Math.PI * 2)
+    ctx.fill()
+
+    ctx.strokeStyle = 'rgba(70, 110, 140, 0.24)'
+    ctx.lineWidth = 1
+    ctx.stroke()
+    return
+  }
+
+  if (kind === 'ruin') {
+    ctx.strokeStyle = 'rgba(90, 90, 90, 0.28)'
+    ctx.lineWidth = Math.max(1, cellPx * 0.03)
+    ctx.strokeRect(
+      px + cellPx * 0.28,
+      py + cellPx * 0.28,
+      cellPx * 0.44,
+      cellPx * 0.44
+    )
+
+    ctx.strokeRect(
+      px + cellPx * 0.38,
+      py + cellPx * 0.38,
+      cellPx * 0.10,
+      cellPx * 0.10
+    )
+    return
+  }
+
+  if (kind === 'rocks') {
+    ctx.fillStyle = 'rgba(95, 95, 95, 0.24)'
+    for (let i = 0; i < 4; i++) {
+      const ox = ((hash2D(x + i, y) % 100) / 100 - 0.5) * cellPx * 0.24
+      const oy = ((hash2D(x, y + i) % 100) / 100 - 0.5) * cellPx * 0.24
+      ctx.beginPath()
+      ctx.arc(cx + ox, cy + oy, cellPx * 0.06, 0, Math.PI * 2)
+      ctx.fill()
+    }
+    return
+  }
+
+  if (kind === 'shrub') {
+    ctx.fillStyle = 'rgba(80, 120, 70, 0.26)'
+    for (let i = 0; i < 3; i++) {
+      const ox = ((hash2D(x * 3 + i, y) % 100) / 100 - 0.5) * cellPx * 0.18
+      const oy = ((hash2D(x, y * 3 + i) % 100) / 100 - 0.5) * cellPx * 0.18
+      ctx.beginPath()
+      ctx.arc(cx + ox, cy + oy, cellPx * 0.05, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }
+}
+
+/* ===== anchor cache helpers (LRU + TTL) ===== */
+
+function anchorKey(x, yUi) {
+  return `${x}:${yUi}`
+}
+
+function touchAnchor(key, value) {
+  anchorCache.delete(key)
+  anchorCache.set(key, value)
+}
+
+function evictAnchorsLRU() {
+  while (anchorCache.size > ANCHOR_CACHE_MAX) {
+    const oldestKey = anchorCache.keys().next().value
+    if (oldestKey == null) break
+    anchorCache.delete(oldestKey)
+  }
+}
+
+function pruneAnchorsTTL(nowMs) {
+  const cutoff = nowMs - ANCHOR_CACHE_TTL_MS
+  for (const [k, a] of anchorCache) {
+    if ((a.lastSeenMs || 0) < cutoff) anchorCache.delete(k)
+  }
+}
+
+function tileXYFromPointerEvent(e) {
+  if (!map) return null
+  const p = map.mouseEventToContainerPoint(e)
+  const ll = map.containerPointToLatLng(p)
+  return latLngToTileXY(ll)
+}
+
+/* ===== backend/ui y normalization ===== */
+
+function backendYToUiY(yBackend) {
+  if (!BACKEND_Y_IS_BOTTOM_ORIGIN) return yBackend
+  return (WORLD.rows - 1) - yBackend
+}
+function uiYToBackendY(yUi) {
+  if (!BACKEND_Y_IS_BOTTOM_ORIGIN) return yUi
+  return (WORLD.rows - 1) - yUi
+}
+
+/* ===== CRS.Simple mapping (y down) ===== */
+
+function tileTopLeftLatLng(x, yUi) {
+  return L.latLng(-yUi * WORLD.cellPx, x * WORLD.cellPx)
+}
+
+function tileCenterLatLng(x, yUi, w = 1, h = 1) {
+  const cx = (x + w / 2) * WORLD.cellPx
+  const cy = (yUi + h / 2) * WORLD.cellPx
+  return L.latLng(-cy, cx)
+}
+
+function latLngToTileXY(latlng) {
+  const x = clamp(Math.floor(latlng.lng / WORLD.cellPx), 0, WORLD.cols - 1)
+  const y = clamp(Math.floor((-latlng.lat) / WORLD.cellPx), 0, WORLD.rows - 1)
+  return { x, y }
+}
+
+function latLngToTileHit(latlng) {
+  const rawX = latlng.lng / WORLD.cellPx
+  const rawY = (-latlng.lat) / WORLD.cellPx
+
+  const x = clamp(Math.floor(rawX), 0, WORLD.cols - 1)
+  const y = clamp(Math.floor(rawY), 0, WORLD.rows - 1)
+
+  const ox = clamp(rawX - x, 0, 1)
+  const oy = clamp(rawY - y, 0, 1)
+
+  return { x, y, ox, oy }
+}
+
+/* ===== infra helpers ===== */
+
+function idxOf(x, yUi) {
+  return (yUi * WORLD.cols) + x
+}
+
+function roleToByte(role) {
+  if (role === 'ybr') return ROLE.YBR
+  if (role === 'road') return ROLE.ROAD
+  if (role === 'plaza') return ROLE.PLAZA
+  return ROLE.NONE
+}
+
+function tileBoundsWithPad_UI(pad) {
+  if (!map) return { xmin: 0, xmax: 0, ymin: 0, ymax: 0 }
+
+  const size = map.getSize()
+  const tl = map.containerPointToLatLng([0, 0])
+  const br = map.containerPointToLatLng([size.x, size.y])
+
+  const a = latLngToTileXY(tl)
+  const b = latLngToTileXY(br)
+
+  let xmin = Math.min(a.x, b.x)
+  let xmax = Math.max(a.x, b.x)
+  let ymin = Math.min(a.y, b.y)
+  let ymax = Math.max(a.y, b.y)
+
+  xmin = clamp(xmin - pad, 0, WORLD.cols - 1)
+  xmax = clamp(xmax + pad, 0, WORLD.cols - 1)
+  ymin = clamp(ymin - pad, 0, WORLD.rows - 1)
+  ymax = clamp(ymax + pad, 0, WORLD.rows - 1)
+
+  return { xmin, xmax, ymin, ymax }
+}
+
+/* ===== active / flip ===== */
+
+function activeKeyFromRoute() {
+  if (route.name !== 'tile') return null
+  const x = Number(route.params.x)
+  const y = Number(route.params.y)
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+  return `${x}:${y}`
+}
+
+function isActive(t) {
+  return activeKeyFromRoute() === `${t.x}:${t.y}`
+}
+
+function isFlipped(t) {
+  return flippedKey.value === `${t.x}:${t.y}`
+}
+
+async function handleTileClick(t, event = null) {
+  if (didMoveSinceDown) return
+
+  let ox = 0.5
+  let oy = 0.5
+
+  if (event && map) {
+    const ll = map.mouseEventToLatLng(event)
+    const hit = latLngToTileHit(ll)
+    ox = hit.ox
+    oy = hit.oy
+  }
+
+  const k = `${t.x}:${t.y}`
+  const activeK = activeKeyFromRoute()
+
+  if (activeK === k) {
+    setSelfPresence(t.x, t.y, ox, oy)
+
+    const willClose = flippedKey.value === k
+    flippedKey.value = willClose ? null : k
+
+    if (willClose) {
+      activeCell.value = null
+      pinnedAnchor.value = null
+      return
+    }
+
+    await refreshActiveCellIfNeeded()
+    return
+  }
+
+  emitPresenceMove(t.x, t.y, ox, oy)
+
+  flippedKey.value = k
+  pendingNavSource = 'click'
+  router.push({ name: 'tile', params: { z: WORLD.z, x: t.x, y: t.y } })
+}
+
+function onTileClick(t, event) {
+  if (t?.flippable === false) return
+  handleTileClick(t, event)
+}
+
+/* ===== leaflet pane mounting ===== */
+
+const INFRA_PANE = 'ewrmInfra'
+const ANCHOR_PANE = 'ewrmAnchors'
+
+function mountAnchorsIntoPane() {
+  if (!map) return
+  const el = anchorLayerEl.value
+  if (!el) return
+
+  const pane = map.getPane(ANCHOR_PANE) || map.createPane(ANCHOR_PANE)
+  pane.style.zIndex = '600'
+  pane.style.pointerEvents = 'none'
+
+  if (el.parentNode !== pane) pane.appendChild(el)
+
+  const worldW = WORLD.cols * WORLD.cellPx
+  const worldH = WORLD.rows * WORLD.cellPx
+
+  el.style.position = 'absolute'
+  el.style.left = '0'
+  el.style.top = '0'
+  el.style.width = `${worldW}px`
+  el.style.height = `${worldH}px`
+  el.style.pointerEvents = 'none'
+
+  requestAnimationFrame(() => {
+    const el2 = anchorLayerEl.value
+    const pane2 = map?.getPane?.(ANCHOR_PANE)
+    if (!el2 || !pane2) return
+    if (el2.parentNode !== pane2) pane2.appendChild(el2)
+  })
+}
+
+function anchorsAreInLeafletPane() {
+  const el = anchorLayerEl.value
+  if (!map || !el) return false
+  return el.parentNode === map.getPane(ANCHOR_PANE)
+}
+
+/* ===== Anchor scale + camera snapshot ===== */
+
+function cellPxInLayer() {
+  if (!map) return WORLD.cellPx
+  const p0 = map.latLngToLayerPoint(tileTopLeftLatLng(0, 0))
+  const p1 = map.latLngToLayerPoint(tileTopLeftLatLng(1, 0))
+  return Math.abs(p1.x - p0.x) || WORLD.cellPx
+}
+
+const camL = {
+  xmin: 0,
+  ymin: 0,
+  px0: 0,
+  py0: 0,
+  cell: WORLD.cellPx,
+}
+
+function updateAnchorCameraLayer() {
+  if (!map) return
+
+  const ui = tileBoundsWithPad_UI(0)
+  camL.xmin = ui.xmin
+  camL.ymin = ui.ymin
+
+  const p0 = map.latLngToLayerPoint(tileTopLeftLatLng(ui.xmin, ui.ymin))
+  camL.px0 = p0.x
+  camL.py0 = p0.y
+
+  camL.cell = cellPxInLayer()
+}
+
+/* ===== anchors ===== */
+
+function tileStyle(t) {
+  if (!map) return { display: 'none' }
+
+  const inPane = anchorsAreInLeafletPane()
+
+  if (inPane) {
+    const cell = camL.cell
+    const px = camL.px0 + (t.x - camL.xmin) * cell
+    const py = camL.py0 + (t.y - camL.ymin) * cell
+
+    const w = Math.max(1, Number(t.w || 1)) * cell
+    const h = Math.max(1, Number(t.h || 1)) * cell
+
+    return {
+      transform: `translate3d(${Math.round(px)}px, ${Math.round(py)}px, 0)`,
+      width: `${Math.round(w)}px`,
+      height: `${Math.round(h)}px`,
+      pointerEvents: t?.flippable === false ? 'none' : 'auto',
+    }
+  }
+
+  const p = map.latLngToContainerPoint(tileTopLeftLatLng(t.x, t.y))
+  const s = screenScale()
+  const w = Math.max(1, Number(t.w || 1)) * WORLD.cellPx * s
+  const h = Math.max(1, Number(t.h || 1)) * WORLD.cellPx * s
+
+  return {
+    transform: `translate3d(${Math.round(p.x)}px, ${Math.round(p.y)}px, 0)`,
+    width: `${Math.round(w)}px`,
+    height: `${Math.round(h)}px`,
+    pointerEvents: 'auto',
+  }
+}
+
+function updateHud() {
+  if (!map) return
+  const tb = tileBoundsWithPad_UI(PAD_DRAW)
+  const c = latLngToTileXY(map.getCenter())
+
+  hud.tb = `${tb.xmin}..${tb.xmax}, ${tb.ymin}..${tb.ymax}`
+  hud.ct = `${c.x},${c.y}`
+  hud.route =
+    route.name === 'tile'
+      ? `/w/10/${route.params.x}/${route.params.y}`
+      : String(route.fullPath)
+  hud.nav = pendingNavSource || '—'
+}
+
+/* ===== API: anchors ===== */
+
+async function refreshViewport() {
+  if (!map) return
+
+  try { viewportAbort?.abort() } catch (_) {}
+  viewportAbort = new AbortController()
+
+  const ui = tileBoundsWithPad_UI(PAD_ANCHORS)
+
+  const by1 = uiYToBackendY(ui.ymin)
+  const by2 = uiYToBackendY(ui.ymax)
+  const yminBackend = Math.min(by1, by2)
+  const ymaxBackend = Math.max(by1, by2)
+
+  const rect = {
+    x: ui.xmin,
+    y: yminBackend,
+    w: (ui.xmax - ui.xmin) + 1,
+    h: (ymaxBackend - yminBackend) + 1,
+  }
+
+  try {
+    const payload = await fetchViewport(
+      { x: rect.x, y: rect.y, w: rect.w, h: rect.h },
+      { signal: viewportAbort.signal }
+    )
+
+    const now = Date.now()
+
+    for (const t of (payload.anchors || [])) {
+      const x = Number(t.x)
+      const yUi = backendYToUiY(Number(t.y))
+      if (!Number.isFinite(x) || !Number.isFinite(yUi)) continue
+
+      const k = anchorKey(x, yUi)
+      const a = {
+        x,
+        y: yUi,
+        w: Math.max(1, Number(t.w || 1)),
+        h: Math.max(1, Number(t.h || 1)),
+        cover: t.cover || null,
+        object: t.object || null,
+        flippable: (t.flippable !== undefined) ? !!t.flippable : undefined,
+        ddt: !!t.ddt,
+        lastSeenMs: now,
+      }
+      touchAnchor(k, a)
+    }
+
+    const list = []
+    const entries = Array.from(anchorCache.entries())
+    for (const [k, a] of entries) {
+      const ax2 = a.x + a.w - 1
+      const ay2 = a.y + a.h - 1
+      if (ax2 < ui.xmin || a.x > ui.xmax || ay2 < ui.ymin || a.y > ui.ymax) continue
+
+      a.lastSeenMs = now
+      touchAnchor(k, a)
+      list.push(a)
+    }
+
+    anchors.value = list
+    anchorCacheSize.value = anchorCache.size
+
+    anchorPruneCounter++
+    if (anchorPruneCounter % ANCHOR_CACHE_PRUNE_EVERY === 0) {
+      pruneAnchorsTTL(now)
+    }
+    evictAnchorsLRU()
+
+    hud.err = '—'
+  } catch (err) {
+    if (err?.name === 'AbortError') return
+    hud.err = String(err?.message || err)
+    console.error(err)
+  }
+}
+
+/* ===== API: infra ===== */
+
+let infraLoaded = false
+let infraLoadingPromise = null
+
+function clearInfraGrid() {
+  infraGrid.fill(ROLE.NONE)
+  infraCount.value = 0
+}
+
+function buildMergedRectPath(roleByte) {
+  const tile = WORLD.cellPx
+  const parts = []
+
+  for (let y = 0; y < WORLD.rows; y++) {
+    const rowBase = y * WORLD.cols
+    let x = 0
+    while (x < WORLD.cols) {
+      if (infraGrid[rowBase + x] !== roleByte) {
+        x++
+        continue
+      }
+
+      const x0 = x
+      x++
+      while (x < WORLD.cols && infraGrid[rowBase + x] === roleByte) x++
+
+      const left = x0 * tile
+      const top = y * tile
+      const width = (x - x0) * tile
+      const height = tile
+
+      parts.push(`M${left} ${top}H${left + width}V${top + height}H${left}Z`)
+    }
+  }
+
+  return parts.join(' ')
+}
+
+function ensureInfraPane() {
+  if (!map) return null
+  const pane = map.getPane(INFRA_PANE) || map.createPane(INFRA_PANE)
+  pane.style.zIndex = '450'
+  pane.style.pointerEvents = 'none'
+  return pane
+}
+
+function mountInfraIntoPane() {
+  if (!map) return
+  const el = infraLayerEl.value
+  if (!el) return
+
+  const pane = ensureInfraPane()
+  if (!pane) return
+
+  if (el.parentNode !== pane) pane.appendChild(el)
+
+  const worldW = WORLD.cols * WORLD.cellPx
+  const worldH = WORLD.rows * WORLD.cellPx
+
+  el.style.position = 'absolute'
+  el.style.left = '0'
+  el.style.top = '0'
+  el.style.width = `${worldW}px`
+  el.style.height = `${worldH}px`
+  el.style.pointerEvents = 'none'
+}
+
+function renderInfraSvg() {
+  const host = infraLayerEl.value
+  if (!host) return
+
+  const worldW = WORLD.cols * WORLD.cellPx
+  const worldH = WORLD.rows * WORLD.cellPx
+  const roadPath = buildMergedRectPath(ROLE.ROAD)
+  const ybrPath = buildMergedRectPath(ROLE.YBR)
+
+  host.innerHTML = `
+    <svg
+      class="infra-svg"
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 ${worldW} ${worldH}"
+      width="${worldW}"
+      height="${worldH}"
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      <defs>
+        <pattern id="ewrm-road-pattern" width="128" height="128" patternUnits="userSpaceOnUse">
+          <rect width="128" height="128" fill="rgba(115,115,115,0.22)" />
+          <g fill="rgba(55,55,55,0.12)">
+            <rect x="12" y="18" width="4" height="2" rx="1" />
+            <rect x="36" y="52" width="3" height="2" rx="1" />
+            <rect x="64" y="20" width="5" height="2" rx="1" />
+            <rect x="88" y="44" width="4" height="2" rx="1" />
+            <rect x="22" y="90" width="5" height="2" rx="1" />
+            <rect x="76" y="84" width="3" height="2" rx="1" />
+            <rect x="102" y="100" width="4" height="2" rx="1" />
+          </g>
+          <g fill="rgba(235,235,235,0.09)">
+            <rect x="18" y="32" width="2" height="2" rx="1" />
+            <rect x="52" y="14" width="2" height="2" rx="1" />
+            <rect x="72" y="60" width="2" height="2" rx="1" />
+            <rect x="110" y="34" width="2" height="2" rx="1" />
+            <rect x="40" y="108" width="2" height="2" rx="1" />
+          </g>
+        </pattern>
+
+        <pattern id="ewrm-ybr-pattern" width="60" height="32" patternUnits="userSpaceOnUse">
+          <rect width="60" height="32" fill="#f2c548" />
+          <rect x="0" y="0" width="29" height="15" fill="#f6d36b" rx="1.5" />
+          <rect x="31" y="0" width="29" height="15" fill="#e3b63b" rx="1.5" />
+          <rect x="15" y="17" width="29" height="15" fill="#f0c95a" rx="1.5" />
+          <path d="M0 16H60" stroke="rgba(92,67,9,0.18)" stroke-width="1" />
+          <path d="M30 0V16M15 16V32M45 16V32" stroke="rgba(92,67,9,0.14)" stroke-width="1" />
+        </pattern>
+
+        <filter id="ewrm-ybr-glow" x="-2%" y="-2%" width="104%" height="104%">
+          <feDropShadow dx="0" dy="0" stdDeviation="3" flood-color="#f4cf62" flood-opacity="0.35"/>
+        </filter>
+      </defs>
+
+      ${roadPath ? `<path d="${roadPath}" fill="url(#ewrm-road-pattern)" opacity="0.96" />` : ''}
+      ${roadPath ? `<path d="${roadPath}" fill="none" stroke="rgba(0,0,0,0.12)" stroke-width="2" vector-effect="non-scaling-stroke" />` : ''}
+      ${ybrPath ? `<path d="${ybrPath}" fill="url(#ewrm-ybr-pattern)" filter="url(#ewrm-ybr-glow)" />` : ''}
+      ${ybrPath ? `<path d="${ybrPath}" fill="none" stroke="rgba(120,86,10,0.22)" stroke-width="2" vector-effect="non-scaling-stroke" />` : ''}
+    </svg>
+  `
+}
+
+async function loadAllInfra() {
+  if (infraLoaded) return
+  if (infraLoadingPromise) return infraLoadingPromise
+
+  infraLoadingPromise = (async () => {
+    clearInfraGrid()
+
+    const data = await fetchInfra({
+      z: WORLD.z,
+      xmin: 0,
+      xmax: WORLD.cols - 1,
+      ymin: 0,
+      ymax: WORLD.rows - 1,
+    })
+
+    for (const t of data || []) {
+      const x = Number(t.x)
+      const yUi = backendYToUiY(Number(t.y))
+      if (!Number.isFinite(x) || !Number.isFinite(yUi)) continue
+      if (x < 0 || x >= WORLD.cols || yUi < 0 || yUi >= WORLD.rows) continue
+
+      const next = roleToByte(t.role)
+      if (next === ROLE.NONE) continue
+
+      const idx = idxOf(x, yUi)
+      if (infraGrid[idx] === ROLE.NONE) infraCount.value++
+      infraGrid[idx] = next
+    }
+
+    renderInfraSvg()
+    infraLoaded = true
+    hud.err = '—'
+  })().catch((err) => {
+    infraLoadingPromise = null
+    hud.err = String(err?.message || err)
+    console.error(err)
+    throw err
+  })
+
+  return infraLoadingPromise
+}
+
+/* ===== active cell ===== */
+
+async function refreshActiveCellIfNeeded() {
+  if (route.name !== 'tile') {
+    activeCell.value = null
+    pinnedAnchor.value = null
+    return
+  }
+
+  const k = activeKeyFromRoute()
+  if (!k || flippedKey.value !== k) {
+    activeCell.value = null
+    pinnedAnchor.value = null
+    return
+  }
+
+  const x = clamp(parseInt(route.params.x, 10), 0, WORLD.cols - 1)
+  const yUi = clamp(parseInt(route.params.y, 10), 0, WORLD.rows - 1)
+  const yBackend = uiYToBackendY(yUi)
+
+  try { cellAbort?.abort() } catch (_) {}
+  cellAbort = new AbortController()
+
+  try {
+    const data = await fetchCell(
+      { x, y: yBackend, full: 1 },
+      { signal: cellAbort.signal }
+    )
+
+    activeCell.value = data
+
+    if (data?.anchor) {
+      const ax = Number(data.anchor.x)
+      const ay = Number(data.anchor.y)
+      const aw = Number(data.anchor.w || 1)
+      const ah = Number(data.anchor.h || 1)
+      const kk = `${ax}:${ay}`
+
+      const fullAnchor = {
+        x: ax,
+        y: ay,
+        w: aw,
+        h: ah,
+        cover: data.cover || null,
+        object: data.object || null,
+        ddt: !!data.ddt,
+        flippable: (data.flippable !== undefined) ? !!data.flippable : undefined,
+        lastSeenMs: Date.now(),
+      }
+
+      pinnedAnchor.value = fullAnchor
+
+      touchAnchor(kk, fullAnchor)
+      anchorCacheSize.value = anchorCache.size
+
+      anchors.value = anchors.value.map((a) =>
+        `${a.x}:${a.y}` === kk
+          ? {
+              ...a,
+              cover: fullAnchor.cover,
+              object: fullAnchor.object,
+              ddt: fullAnchor.ddt,
+              flippable: fullAnchor.flippable,
+              w: fullAnchor.w,
+              h: fullAnchor.h,
+            }
+          : a
+      )
+
+      if (!tabByKey[kk]) tabByKey[kk] = 'embed'
+    } else {
+      pinnedAnchor.value = null
+    }
+  } catch (err) {
+    if (err?.name === 'AbortError') return
+    console.error(err)
+    activeCell.value = null
+    pinnedAnchor.value = null
+  }
+}
+
+/* ===== deep-link centering ===== */
+
+async function centerDeepLinkIfNeeded() {
+  if (!map) return null
+
+  if (route.name === 'object') {
+    const bundle = String(route.params.bundle)
+    const slug = String(route.params.slug)
+    const resolved = await resolveObject({ bundle, slug })
+    if (resolved?.found && resolved?.anchor) {
+      const ax = Number(resolved.anchor.x)
+      const ayUi = backendYToUiY(Number(resolved.anchor.y))
+      router.replace({ name: 'tile', params: { z: WORLD.z, x: ax, y: ayUi } })
+    }
+    return null
+  }
+
+  if (route.name !== 'tile') return null
+
+  const x = clamp(parseInt(route.params.x, 10), 0, WORLD.cols - 1)
+  const yUi = clamp(parseInt(route.params.y, 10), 0, WORLD.rows - 1)
+  const yBackend = uiYToBackendY(yUi)
+
+  try {
+    const data = await fetchCell({ x, y: yBackend })
+    const ax = Number(data?.anchor?.x ?? x)
+    const ayBackend = Number(data?.anchor?.y ?? yBackend)
+    const aw = Math.max(1, Number(data?.anchor?.w ?? 1))
+    const ah = Math.max(1, Number(data?.anchor?.h ?? 1))
+    const ayUi = backendYToUiY(ayBackend)
+
+    map.setView(tileCenterLatLng(ax, ayUi, aw, ah), map.getZoom(), { animate: false })
+    return data
+  } catch (_) {
+    map.setView(tileCenterLatLng(x, yUi, 1, 1), map.getZoom(), { animate: false })
+    return null
+  }
+}
+
+/* ===== canvas ===== */
+
+function scheduleFrame() {
+  if (raf) return
+  raf = requestAnimationFrame(() => {
+    raf = 0
+    updateAnchorCameraLayer()
+    updateHud()
+  })
+}
+
+/* ===== route pipeline ===== */
+
+async function handleRoutePipeline() {
+  if (!map) return
+
+  const source = pendingNavSource
+  pendingNavSource = null
+
+  const isDeepLinkCenterCase =
+    !hasInitialized ||
+    (source !== 'click' && (route.name === 'tile' || route.name === 'object'))
+
+  let deepLinkCell = null
+  if (isDeepLinkCenterCase) {
+    deepLinkCell = await centerDeepLinkIfNeeded()
+  }
+
+  if (source !== 'click' && route.name === 'tile') {
+    const rx = Number(route.params.x)
+    const ry = Number(route.params.y)
+
+    if (Number.isFinite(rx) && Number.isFinite(ry)) {
+      let data = deepLinkCell
+
+      if (!data) {
+        const yBackend = uiYToBackendY(ry)
+        try {
+          data = await fetchCell({ x: rx, y: yBackend })
+        } catch (_) {
+          data = null
+        }
+      }
+
+      const canFlip = data?.flippable === true
+      flippedKey.value = canFlip ? `${rx}:${ry}` : null
+    }
+  }
+
+  hasInitialized = true
+
+  await refreshViewport()
+  await refreshActiveCellIfNeeded()
+  scheduleFrame()
+}
+
+/* ===== DDT Drag gating ===== */
+
+let ddtPointerDownHandler = null
+let ddtPointerUpHandler = null
+
+function installDDTDragGating() {
+  if (!map) return
+
+  map.dragging.disable()
+
+  const container = map.getContainer()
+
+  ddtPointerDownHandler = (e) => {
+    const noDrag = e.target?.closest?.(
+      '.tile-ui, .tile-tabs, .tile-body, .tile-panel, iframe, a, button, input, textarea, select'
+    )
+    if (noDrag) {
+      map.dragging.disable()
+      return
+    }
+
+    const shell = e.target?.closest?.('.tile-shell')
+    const isDDTAnchor = !!shell && shell.dataset.ddt === '1'
+
+    let isDDTInfra = false
+    const xy = tileXYFromPointerEvent(e)
+    if (xy) {
+      const role = infraGrid[idxOf(xy.x, xy.y)]
+      isDDTInfra = (role === ROLE.ROAD || role === ROLE.YBR)
+    }
+
+    const ok = isDDTAnchor || isDDTInfra
+    ok ? map.dragging.enable() : map.dragging.disable()
+  }
+
+  ddtPointerUpHandler = () => {
+    map.dragging.disable()
+  }
+
+  container.addEventListener('pointerdown', ddtPointerDownHandler, { passive: true, capture: true })
+  container.addEventListener('pointerup', ddtPointerUpHandler, { passive: true, capture: true })
+  container.addEventListener('pointercancel', ddtPointerUpHandler, { passive: true, capture: true })
+}
+
+function uninstallDDTDragGating() {
+  const container = map?.getContainer?.()
+  if (!container) return
+
+  if (ddtPointerDownHandler) {
+    container.removeEventListener('pointerdown', ddtPointerDownHandler, true)
+  }
+  if (ddtPointerUpHandler) {
+    container.removeEventListener('pointerup', ddtPointerUpHandler, true)
+    container.removeEventListener('pointercancel', ddtPointerUpHandler, true)
+  }
+
+  ddtPointerDownHandler = null
+  ddtPointerUpHandler = null
+}
+
+/* ===== realtime presence ===== */
+
+function syncPresenceCount() {
+  presenceCount.value = presenceMarkers.size
+}
+
+function ensurePresencePane() {
+  if (!map) return null
+  const pane = map.getPane(PRESENCE_PANE) || map.createPane(PRESENCE_PANE)
+  pane.style.zIndex = '550'
+  pane.style.pointerEvents = 'none'
+  return pane
+}
+
+function markerLatLngForTile(x, y, ox = 0.5, oy = 0.5) {
+  const lng = (x + ox) * WORLD.cellPx
+  const lat = -(y + oy) * WORLD.cellPx
+  return L.latLng(lat, lng)
+}
+
+function upsertPresenceMarker({ id, x, y, ox = 0.5, oy = 0.5 }) {
+  if (!map) return
+  if (!id) return
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return
+
+  ensurePresencePane()
+
+  const ll = markerLatLngForTile(x, y, ox, oy)
+  let marker = presenceMarkers.get(id)
+  const isSelf = id === ownSocketId
+  const style = isSelf ? PRESENCE_STYLE_SELF : PRESENCE_STYLE_OTHER
+
+  if (!marker) {
+    marker = L.circleMarker(ll, style).addTo(map)
+    presenceMarkers.set(id, marker)
+    syncPresenceCount()
+    return
+  }
+
+  marker.setLatLng(ll)
+  marker.setStyle(style)
+}
+
+function removePresenceMarker(id) {
+  const marker = presenceMarkers.get(id)
+  if (!marker) return
+  map?.removeLayer(marker)
+  presenceMarkers.delete(id)
+  syncPresenceCount()
+}
+
+function clearPresenceMarkers() {
+  for (const marker of presenceMarkers.values()) {
+    map?.removeLayer(marker)
+  }
+  presenceMarkers.clear()
+  syncPresenceCount()
+}
+
+function reconcilePresenceSnapshot(users = []) {
+  const keep = new Set()
+
+  for (const user of users) {
+    if (!user?.id) continue
+    keep.add(user.id)
+    upsertPresenceMarker(user)
+  }
+
+  for (const [id] of Array.from(presenceMarkers.entries())) {
+    if (!keep.has(id)) {
+      removePresenceMarker(id)
+    }
+  }
+}
+
+function currentRouteTile() {
+  if (route.name !== 'tile') return null
+
+  const x = Number(route.params.x)
+  const y = Number(route.params.y)
+
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+
+  return {
+    x: clamp(x, 0, WORLD.cols - 1),
+    y: clamp(y, 0, WORLD.rows - 1),
+  }
+}
+
+function regionKeysForViewport(pad = 1) {
+  if (!map) return []
+
+  const bounds = map.getBounds()
+  const nw = bounds.getNorthWest()
+  const se = bounds.getSouthEast()
+
+  const tl = latLngToTileXY(nw)
+  const br = latLngToTileXY(se)
+
+  const minRx = Math.floor(tl.x / PRESENCE_REGION_SIZE) - pad
+  const maxRx = Math.floor(br.x / PRESENCE_REGION_SIZE) + pad
+  const minRy = Math.floor(tl.y / PRESENCE_REGION_SIZE) - pad
+  const maxRy = Math.floor(br.y / PRESENCE_REGION_SIZE) + pad
+
+  const maxRegionX = Math.ceil(WORLD.cols / PRESENCE_REGION_SIZE) - 1
+  const maxRegionY = Math.ceil(WORLD.rows / PRESENCE_REGION_SIZE) - 1
+
+  const regions = []
+
+  for (let ry = minRy; ry <= maxRy; ry++) {
+    for (let rx = minRx; rx <= maxRx; rx++) {
+      if (rx < 0 || ry < 0) continue
+      if (rx > maxRegionX || ry > maxRegionY) continue
+      regions.push(`${rx}:${ry}`)
+    }
+  }
+
+  return regions
+}
+
+function sameRegionArray(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false
+  if (a.length !== b.length) return false
+
+  const as = [...a].sort()
+  const bs = [...b].sort()
+
+  for (let i = 0; i < as.length; i++) {
+    if (as[i] !== bs[i]) return false
+  }
+
+  return true
+}
+
+function refreshPresenceForViewport() {
+  if (!map || !socket) return
+
+  const regions = regionKeysForViewport(1)
+
+  if (sameRegionArray(regions, lastViewportRegions)) return
+  lastViewportRegions = [...regions]
+
+  socket.emit('presence:watchMany', { regions })
+}
+
+function setSelfPresence(x, y, ox = 0.5, oy = 0.5) {
+  selfPresence.x = x
+  selfPresence.y = y
+  selfPresence.ox = ox
+  selfPresence.oy = oy
+
+  if (ownSocketId) {
+    upsertPresenceMarker({ id: ownSocketId, x, y, ox, oy })
+  }
+}
+
+function emitPresenceJoin(x, y, ox = 0.5, oy = 0.5) {
+  if (!socket) return
+  setSelfPresence(x, y, ox, oy)
+  socket.emit('presence:join', { x, y, ox, oy })
+}
+
+function emitPresenceMove(x, y, ox = 0.5, oy = 0.5) {
+  if (!socket) return
+  setSelfPresence(x, y, ox, oy)
+  socket.emit('presence:move', { x, y, ox, oy })
+}
+
+function emitPresenceJoinForCurrentRoute(ox = 0.5, oy = 0.5) {
+  const t = currentRouteTile()
+  if (!t) return
+  emitPresenceJoin(t.x, t.y, ox, oy)
+}
+
+function initRealtime() {
+  if (socket) return
+
+  socket = io(window.location.origin, {
+    path: REALTIME_PATH,
+    transports: ['websocket'],
+  })
+
+  socket.on('connect', () => {
+    ownSocketId = socket.id || null
+    lastViewportRegions = []
+
+    emitPresenceJoinForCurrentRoute()
+    refreshPresenceForViewport()
+  })
+
+  socket.on('disconnect', () => {
+    ownSocketId = null
+    lastViewportRegions = []
+    clearPresenceMarkers()
+  })
+
+  socket.on('presence:snapshot', (payload) => {
+    const users = Array.isArray(payload?.users) ? payload.users : []
+
+    if (ownSocketId && Number.isFinite(selfPresence.x) && Number.isFinite(selfPresence.y)) {
+      const hasSelf = users.some((u) => u?.id === ownSocketId)
+      if (!hasSelf) {
+        users.push({
+          id: ownSocketId,
+          x: selfPresence.x,
+          y: selfPresence.y,
+          ox: selfPresence.ox,
+          oy: selfPresence.oy,
+        })
+      }
+    }
+
+    reconcilePresenceSnapshot(users)
+  })
+
+  socket.on('presence:update', (payload) => {
+    upsertPresenceMarker(payload || {})
+  })
+
+  socket.on('presence:leave', (payload) => {
+    if (!payload?.id) return
+    removePresenceMarker(payload.id)
+  })
+}
+
+function destroyRealtime() {
+  if (!socket) return
+  socket.off('connect')
+  socket.off('disconnect')
+  socket.off('presence:snapshot')
+  socket.off('presence:update')
+  socket.off('presence:leave')
+  socket.disconnect()
+  socket = null
+  ownSocketId = null
+  lastViewportRegions = []
+  clearPresenceMarkers()
+}
+
+/* ===== lifecycle ===== */
+
+let ro = null
+
+onMounted(async () => {
+  const worldWidth = WORLD.cols * WORLD.cellPx
+  const worldHeight = WORLD.rows * WORLD.cellPx
+  const bounds = L.latLngBounds([0, 0], [-worldHeight, worldWidth])
+
+  await new Promise(requestAnimationFrame)
+
+  const containerWidth = mapEl.value.getBoundingClientRect().width
+  const TILE_PX = WORLD.cellPx
+  const paddingPx = 32
+
+  const INITIAL_MOBILE_SCALE = 0.75
+  const isMobile = window.matchMedia('(pointer: coarse)').matches
+
+  const lockedZoom = isMobile
+    ? Math.log2(containerWidth / ((2 * TILE_PX) + paddingPx)) + Math.log2(INITIAL_MOBILE_SCALE)
+    : 0
+
+  map = L.map(mapEl.value, {
+    crs: L.CRS.Simple,
+    zoomSnap: 0,
+    zoomDelta: 0.25,
+    zoom: lockedZoom,
+    minZoom: lockedZoom,
+    maxZoom: lockedZoom,
+    dragging: true,
+    inertia: true,
+    inertiaThreshold: 0,
+    inertiaDeceleration: 900,
+    inertiaMaxSpeed: 3500,
+    easeLinearity: 0.12,
+    maxBoundsViscosity: 0.5,
+    zoomControl: false,
+    attributionControl: false,
+    scrollWheelZoom: false,
+    doubleClickZoom: false,
+    touchZoom: false,
+    boxZoom: false,
+    keyboard: false,
+    zoomAnimation: false,
+    fadeAnimation: false,
+    markerZoomAnimation: false,
+  })
+
+  installDDTDragGating()
+
+  map.setMaxBounds(bounds)
+  map.setView(L.latLng(-worldHeight / 2, worldWidth / 2), lockedZoom, { animate: false })
+
+  mountInfraIntoPane()
+  mountAnchorsIntoPane()
+  ensurePresencePane()
+  initRealtime()
+
+  ro = new ResizeObserver(() => {
+    updateAnchorCameraLayer()
+    updateHud()
+  })
+  ro.observe(mapEl.value)
+
+  await loadAllInfra()
+
+  map.on('movestart', () => {
+    didMoveSinceDown = true
+    isMoving = true
+  })
+
+  map.on('move', () => {
+    scheduleFrame()
+  })
+
+  map.on('moveend', async () => {
+    setTimeout(() => { didMoveSinceDown = false }, 0)
+
+    try {
+      await refreshViewport()
+      await refreshActiveCellIfNeeded()
+    } finally {
+      isMoving = false
+      refreshPresenceForViewport()
+      scheduleFrame()
+    }
+  })
+
+  map.on('zoomend', refreshPresenceForViewport)
+
+  map.on('click', (e) => {
+    if (didMoveSinceDown) return
+
+    const target = e.originalEvent?.target
+    if (target && target.closest && target.closest('.tile-shell')) return
+
+    if (flippedKey.value) {
+      return
+    }
+
+    const { x, y, ox, oy } = latLngToTileHit(e.latlng)
+
+    emitPresenceMove(x, y, ox, oy)
+
+    pendingNavSource = 'click'
+    router.push({ name: 'tile', params: { z: WORLD.z, x, y } })
+  })
+
+  requestAnimationFrame(() => {
+    map.invalidateSize({ pan: false })
+    scheduleFrame()
+    handleRoutePipeline().catch(console.error)
+  })
+})
+
+watch(
+  () => route.fullPath,
+  () => handleRoutePipeline().catch(console.error)
+)
+
+watch(
+  () => [route.name, route.params.x, route.params.y],
+  () => {
+    // no-op for now; movement is driven by actual clicks / connect join
+  }
+)
+
+watch(
+  () => flippedKey.value,
+  () => refreshActiveCellIfNeeded()
+)
+
+onBeforeUnmount(() => {
+  try { cellAbort?.abort() } catch (_) {}
+  try { viewportAbort?.abort() } catch (_) {}
+
+  if (raf) cancelAnimationFrame(raf)
+
+  ro?.disconnect()
+
+  uninstallDDTDragGating()
+  destroyRealtime()
+
+  map?.remove()
+  map = null
+
+  anchorCache.clear()
+})
+</script>
+
+<style scoped>
+.wrap { position: relative; width: 100vw; height: 100vh; }
+.map { width: 100%; height: 100%; }
+:deep(.leaflet-container) { background: #eee; }
+
+.infra-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+
+:deep(.infra-svg) {
+  display: block;
+}
+
+.anchor-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  z-index: 20;
+}
+
+.tile-shell {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: auto;
+  will-change: transform;
+}
+
+.tile-shell.is-active {
+  outline: 4px solid rgba(0, 0, 0, 0.6);
+  outline-offset: -4px;
+  z-index: 5;
+}
+
+.tile-shell { z-index: 1; }
+.tile-shell.is-active { z-index: 50; }
+.tile-shell.is-flipped { z-index: 100; }
+
+.hud {
+  position: fixed;
+  left: 10px;
+  top: 10px;
+  z-index: 9999;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: #111;
+  pointer-events: none;
+}
+</style>
