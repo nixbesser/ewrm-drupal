@@ -83,12 +83,6 @@
       </span>
     </div>
 
-    <!-- <div
-      v-if="vehicle.visible && followVehicle"
-      class="ride-bus-overlay"
-      :style="rideBusOverlayStyle"
-    ></div> -->
-
 <div
       v-if="vehicle.visible && followVehicle"
       class="ride-vehicle-overlay"
@@ -130,11 +124,6 @@ const INFRA_MOVE_THROTTLE_MS = 250
 const RIDE_INFRA_PAD = 28
 const RIDE_INFRA_THROTTLE_MS = 140
 
-const vehicleImgSrc = `${import.meta.env.BASE_URL}vehicles/ladybug.png`
-// let lastRideCenterX = null
-// let lastRideCenterY = null
-// const RIDE_CENTER_EPSILON_TILES = 0.25
-
 const ROLE = { NONE: 0, ROAD: 1, YBR: 2, PLAZA: 3 }
 
 const ANCHOR_CACHE_MAX = 8000
@@ -167,14 +156,16 @@ if (dy < 0) return 0
   return vehicleLastAngle
 }
 
+const vehicleImgSrc = `${import.meta.env.BASE_URL}vehicles/silver-car.png?v=2`
+
 function createVehicleIcon(angle = 0) {
-  const src = `${import.meta.env.BASE_URL}vehicles/ladybug.png`
+  const src = vehicleImgSrc
 
   return L.divIcon({
     className: 'vehicle-icon-wrap',
-    html: `<img class="vehicle-icon" src="${src}" alt="Bus" style="transform: rotate(${angle}deg);" />`,
-    iconSize: [128, 128],
-    iconAnchor: [64, 64],
+    html: `<img class="vehicle-icon" src="${src}" alt="Vehicle" style="transform: rotate(${angle}deg);" />`,
+    iconSize: [128, 264],
+    iconAnchor: [64, 132],
   })
 }
 
@@ -1366,13 +1357,19 @@ function renderInfraSvg() {
   const ybrPath = tileRunPath(ROLE.YBR, ui, px0, py0, cellPxScreen)
   const plazaPath = tileRunPath(ROLE.PLAZA, ui, px0, py0, cellPxScreen)
 
+  /**
+   * Inner shoulders:
+   * These are intentionally eroded inward, so the total road footprint does not grow.
+   */
+  const ybrShoulderPx = Math.max(6, cellPxScreen * 0.2)
+  const roadShoulderPx = Math.max(4, cellPxScreen * 0.1)
+
+  /**
+   * Small YBR brick scale.
+   */
   const mortar = Math.max(1, cellPxScreen * 0.012)
   const brickW = Math.max(10, cellPxScreen * 0.24)
   const brickH = Math.max(6, cellPxScreen * 0.11)
-
-  const ybrShoulderPx = Math.max(3, cellPxScreen * 0.055)
-  const roadShoulderPx = Math.max(2, cellPxScreen * 0.028)
-
   const stepX = brickW + mortar
   const stepY = brickH + mortar
   const patternW = stepX * 2
@@ -1382,6 +1379,7 @@ function renderInfraSvg() {
   const brickStroke = Math.max(0.6, brickH * 0.045)
   const highlightInset = Math.max(1, brickH * 0.10)
 
+  // Lock the brick pattern to world-space so it does not swim during panning.
   const patternOffsetX = world0.x % patternW
   const patternOffsetY = world0.y % patternH
 
@@ -1401,7 +1399,7 @@ function renderInfraSvg() {
       <rect
         x="${x + highlightInset}"
         y="${y + highlightInset}"
-        width="${brickW - (highlightInset * 2)}"
+        width="${Math.max(1, brickW - (highlightInset * 2))}"
         height="${Math.max(1, brickH * 0.12)}"
         rx="${Math.max(1, brickRx * 0.45)}"
         ry="${Math.max(1, brickRx * 0.45)}"
@@ -1442,62 +1440,90 @@ function renderInfraSvg() {
         </pattern>
 
         ${
-          ybrPath
+          roadPath
             ? `
-              <clipPath id="ybr-clip">
-                <path d="${ybrPath}" />
-              </clipPath>
+              <filter
+                id="road-inner-fill-filter"
+                x="-20%"
+                y="-20%"
+                width="140%"
+                height="140%"
+                color-interpolation-filters="sRGB"
+              >
+                <feMorphology
+                  in="SourceAlpha"
+                  operator="erode"
+                  radius="${roadShoulderPx}"
+                  result="eroded"
+                />
+                <feFlood flood-color="#31404a" result="fillColor" />
+                <feComposite in="fillColor" in2="eroded" operator="in" result="innerFill" />
+              </filter>
             `
             : ''
         }
 
-        <filter
-          id="ybr-shoulder-filter"
-          x="-20%"
-          y="-20%"
-          width="140%"
-          height="140%"
-          color-interpolation-filters="sRGB"
-        >
-          <feMorphology in="SourceAlpha" operator="dilate" radius="${ybrShoulderPx}" result="dilated" />
-          <feComposite in="dilated" in2="SourceAlpha" operator="out" result="ring" />
-          <feFlood flood-color="#b87400" result="color" />
-          <feComposite in="color" in2="ring" operator="in" result="shoulder" />
-        </filter>
+        ${
+          ybrPath
+            ? `
+              <filter
+                id="ybr-inner-mask-filter"
+                x="-20%"
+                y="-20%"
+                width="140%"
+                height="140%"
+                color-interpolation-filters="sRGB"
+              >
+                <feMorphology
+                  in="SourceAlpha"
+                  operator="erode"
+                  radius="${ybrShoulderPx}"
+                  result="eroded"
+                />
+                <feFlood flood-color="white" result="white" />
+                <feComposite in="white" in2="eroded" operator="in" result="innerMask" />
+              </filter>
 
-        <filter
-          id="road-shoulder-filter"
-          x="-20%"
-          y="-20%"
-          width="140%"
-          height="140%"
-          color-interpolation-filters="sRGB"
-        >
-          <feMorphology in="SourceAlpha" operator="dilate" radius="${roadShoulderPx}" result="dilated" />
-          <feComposite in="dilated" in2="SourceAlpha" operator="out" result="ring" />
-          <feFlood flood-color="#243038" result="color" />
-          <feComposite in="color" in2="ring" operator="in" result="shoulder" />
-        </filter>
-
+              <mask
+                id="ybr-inner-mask"
+                maskUnits="userSpaceOnUse"
+                x="0"
+                y="0"
+                width="${viewportW}"
+                height="${viewportH}"
+              >
+                <rect x="0" y="0" width="${viewportW}" height="${viewportH}" fill="black" />
+                <path d="${ybrPath}" fill="white" filter="url(#ybr-inner-mask-filter)" />
+              </mask>
+            `
+            : ''
+        }
       </defs>
 
-      ${roadPath ? `<path d="${roadPath}" fill="#000" filter="url(#road-shoulder-filter)" />` : ''}
-      ${roadPath ? `<path d="${roadPath}" fill="#31404a" />` : ''}
+      ${
+        roadPath
+          ? `
+            <path d="${roadPath}" fill="#243038" />
+            <path d="${roadPath}" fill="#000" filter="url(#road-inner-fill-filter)" />
+          `
+          : ''
+      }
 
       ${plazaPath ? `<path d="${plazaPath}" fill="rgba(255,255,255,0.22)" />` : ''}
 
       ${
         ybrPath
-          ? `<path d="${ybrPath}" fill="#000" filter="url(#ybr-shoulder-filter)" />`
-          : ''
-      }
-
-      ${
-        ybrPath
           ? `
-            <path d="${ybrPath}" fill="#d99500" />
+            <path d="${ybrPath}" fill="#b87400" />
 
-            <g clip-path="url(#ybr-clip)">
+            <g mask="url(#ybr-inner-mask)">
+              <rect
+                x="${-patternW}"
+                y="${-patternH}"
+                width="${viewportW + patternW * 2}"
+                height="${viewportH + patternH * 2}"
+                fill="#d99500"
+              />
               <rect
                 x="${-patternW}"
                 y="${-patternH}"
@@ -2906,7 +2932,7 @@ const rideVehicleOverlayStyle = computed(() => {
 :deep(.vehicle-icon) {
   display: block;
   width: 128px;
-  height: 128px;
+  height: 264px;
   pointer-events: none;
   user-select: none;
   transform-origin: 50% 50%;
@@ -2917,7 +2943,7 @@ const rideVehicleOverlayStyle = computed(() => {
   left: 50%;
   top: 50%;
   width: 128px;
-  height: 128px;
+  height: 264px;
   z-index: 1200;
   pointer-events: none;
 }
