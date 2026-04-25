@@ -121,8 +121,8 @@ const PAD_DRAW = 2
 
 const INFRA_MOVE_THROTTLE_MS = 250
 
-const RIDE_INFRA_PAD = 28
-const RIDE_INFRA_THROTTLE_MS = 140
+const RIDE_INFRA_PAD = 36
+const RIDE_INFRA_THROTTLE_MS = 120
 
 const ROLE = { NONE: 0, ROAD: 1, YBR: 2, PLAZA: 3 }
 
@@ -525,45 +525,48 @@ function popTileColor(x, y) {
 function drawEmptyLandscapeTile(ctx2d, x, y, px, py, cellPx) {
   const color = popTileColor(x, y)
 
+  // Flat base color
   ctx2d.fillStyle = color.base
   ctx2d.fillRect(px, py, cellPx, cellPx)
 
+  // Very subtle texture only, no tile edge treatment
   if (cellPx >= 32) {
-    const gradient = ctx2d.createLinearGradient(px, py, px + cellPx, py + cellPx)
-    gradient.addColorStop(0, 'rgba(255,255,255,0.10)')
-    gradient.addColorStop(1, 'rgba(0,0,0,0.08)')
-    ctx2d.fillStyle = gradient
-    ctx2d.fillRect(px, py, cellPx, cellPx)
-  }
-
-  if (cellPx >= 48) {
-    ctx2d.fillStyle = 'rgba(255,255,255,0.08)'
-    ctx2d.fillRect(px, py, cellPx, Math.max(1, cellPx * 0.035))
-    ctx2d.fillRect(px, py, Math.max(1, cellPx * 0.035), cellPx)
-  }
-
-  ctx2d.strokeStyle = POP_GRID_LINE
-  ctx2d.lineWidth = 1
-  ctx2d.strokeRect(px + 0.5, py + 0.5, cellPx - 1, cellPx - 1)
-
-  if (cellPx >= 72) {
     const h = hash2D(x, y)
-    const count = 3 + (h % 4)
+    const count = 6 + (h % 8)
 
-    ctx2d.fillStyle = 'rgba(255,255,255,0.12)'
+    // tiny soft speckles
+    ctx2d.fillStyle = 'rgba(255,255,255,0.10)'
     for (let i = 0; i < count; i++) {
-      const dx = ((hash2D(x + i * 11, y) % 1000) / 1000)
-      const dy = ((hash2D(x, y + i * 17) % 1000) / 1000)
+      const dx = (hash2D(x + i * 17, y + i * 7) % 1000) / 1000
+      const dy = (hash2D(x + i * 11, y + i * 23) % 1000) / 1000
+      const r = Math.max(1, cellPx * 0.008)
 
       ctx2d.beginPath()
       ctx2d.arc(
         px + dx * cellPx,
         py + dy * cellPx,
-        Math.max(1, cellPx * 0.01),
+        r,
         0,
         Math.PI * 2
       )
       ctx2d.fill()
+    }
+
+    // a few faint matte flecks
+    ctx2d.fillStyle = 'rgba(255,255,255,0.04)'
+    const flecks = 2 + (h % 3)
+    for (let i = 0; i < flecks; i++) {
+      const dx = (hash2D(x + i * 29, y + i * 13) % 1000) / 1000
+      const dy = (hash2D(x + i * 31, y + i * 19) % 1000) / 1000
+      const fw = Math.max(2, cellPx * 0.12)
+      const fh = Math.max(2, cellPx * 0.04)
+
+      ctx2d.fillRect(
+        px + dx * (cellPx - fw),
+        py + dy * (cellPx - fh),
+        fw,
+        fh
+      )
     }
   }
 }
@@ -1096,7 +1099,7 @@ function updateInfraLayerPosition() {
 
   el.style.width = `${viewportW}px`
   el.style.height = `${viewportH}px`
-  el.style.transform = `translate3d(${Math.round(layerPoint.x)}px, ${Math.round(layerPoint.y)}px, 0)`
+  el.style.transform = `translate3d(${layerPoint.x}px, ${layerPoint.y}px, 0)`
 }
 
 function mountAnchorsIntoPane() {
@@ -1303,7 +1306,7 @@ function makeGrassPattern() {
 
 /* ===== infra SVG layer ===== */
 
-const INFRA_SVG_PAD = 3
+const INFRA_SVG_PAD = 8
 let infraSvgRefreshRaf = 0
 
 function tileRunPath(role, uiRect, px0, py0, cellPxScreen) {
@@ -1326,6 +1329,44 @@ function tileRunPath(role, uiRect, px0, py0, cellPxScreen) {
       const py = py0 + (y - uiRect.ymin) * cellPxScreen
       const w = len * cellPxScreen
       const h = cellPxScreen
+
+      d += `M${px} ${py}H${px + w}V${py + h}H${px}Z`
+    }
+  }
+
+  return d
+}
+
+function tileRunPathInset(role, uiRect, px0, py0, cellPxScreen, insetPx) {
+  let d = ''
+
+  const inset = Math.max(0, Math.min(insetPx, cellPxScreen * 0.45))
+
+  function hasRole(tx, ty) {
+    if (tx < 0 || tx >= WORLD.cols || ty < 0 || ty >= WORLD.rows) return false
+    return infraGrid[idxOf(tx, ty)] === role
+  }
+
+  for (let y = uiRect.ymin; y <= uiRect.ymax; y++) {
+    for (let x = uiRect.xmin; x <= uiRect.xmax; x++) {
+      if (!hasRole(x, y)) continue
+
+      const hasTop = hasRole(x, y - 1)
+      const hasBottom = hasRole(x, y + 1)
+      const hasLeft = hasRole(x - 1, y)
+      const hasRight = hasRole(x + 1, y)
+
+      // Only inset true outside edges.
+      // Connected edges stay full-width so the YBR remains continuous.
+      const leftInset = hasLeft ? 0 : inset
+      const rightInset = hasRight ? 0 : inset
+      const topInset = hasTop ? 0 : inset
+      const bottomInset = hasBottom ? 0 : inset
+
+      const px = px0 + (x - uiRect.xmin) * cellPxScreen + leftInset
+      const py = py0 + (y - uiRect.ymin) * cellPxScreen + topInset
+      const w = Math.max(1, cellPxScreen - leftInset - rightInset)
+      const h = Math.max(1, cellPxScreen - topInset - bottomInset)
 
       d += `M${px} ${py}H${px + w}V${py + h}H${px}Z`
     }
@@ -1357,16 +1398,25 @@ function renderInfraSvg() {
   const ybrPath = tileRunPath(ROLE.YBR, ui, px0, py0, cellPxScreen)
   const plazaPath = tileRunPath(ROLE.PLAZA, ui, px0, py0, cellPxScreen)
 
-  /**
-   * Inner shoulders:
-   * These are intentionally eroded inward, so the total road footprint does not grow.
-   */
-  const ybrShoulderPx = Math.max(6, cellPxScreen * 0.2)
-  const roadShoulderPx = Math.max(4, cellPxScreen * 0.1)
+  // Inner shoulders via plain inset paths. No SVG filters/masks.
+  const roadInsetPath = tileRunPathInset(
+    ROLE.ROAD,
+    ui,
+    px0,
+    py0,
+    cellPxScreen,
+    Math.max(3, cellPxScreen * 0.045)
+  )
 
-  /**
-   * Small YBR brick scale.
-   */
+  const ybrInsetPath = tileRunPathInset(
+    ROLE.YBR,
+    ui,
+    px0,
+    py0,
+    cellPxScreen,
+    Math.max(5, cellPxScreen * 0.085)
+  )
+
   const mortar = Math.max(1, cellPxScreen * 0.012)
   const brickW = Math.max(10, cellPxScreen * 0.24)
   const brickH = Math.max(6, cellPxScreen * 0.11)
@@ -1379,7 +1429,6 @@ function renderInfraSvg() {
   const brickStroke = Math.max(0.6, brickH * 0.045)
   const highlightInset = Math.max(1, brickH * 0.10)
 
-  // Lock the brick pattern to world-space so it does not swim during panning.
   const patternOffsetX = world0.x % patternW
   const patternOffsetY = world0.y % patternH
 
@@ -1438,114 +1487,29 @@ function renderInfraSvg() {
           ${brickRect(stepX / 2, stepY)}
           ${brickRect(stepX * 1.5, stepY)}
         </pattern>
-
-        ${
-          roadPath
-            ? `
-              <filter
-                id="road-inner-fill-filter"
-                x="-20%"
-                y="-20%"
-                width="140%"
-                height="140%"
-                color-interpolation-filters="sRGB"
-              >
-                <feMorphology
-                  in="SourceAlpha"
-                  operator="erode"
-                  radius="${roadShoulderPx}"
-                  result="eroded"
-                />
-                <feFlood flood-color="#31404a" result="fillColor" />
-                <feComposite in="fillColor" in2="eroded" operator="in" result="innerFill" />
-              </filter>
-            `
-            : ''
-        }
-
-        ${
-          ybrPath
-            ? `
-              <filter
-                id="ybr-inner-mask-filter"
-                x="-20%"
-                y="-20%"
-                width="140%"
-                height="140%"
-                color-interpolation-filters="sRGB"
-              >
-                <feMorphology
-                  in="SourceAlpha"
-                  operator="erode"
-                  radius="${ybrShoulderPx}"
-                  result="eroded"
-                />
-                <feFlood flood-color="white" result="white" />
-                <feComposite in="white" in2="eroded" operator="in" result="innerMask" />
-              </filter>
-
-              <mask
-                id="ybr-inner-mask"
-                maskUnits="userSpaceOnUse"
-                x="0"
-                y="0"
-                width="${viewportW}"
-                height="${viewportH}"
-              >
-                <rect x="0" y="0" width="${viewportW}" height="${viewportH}" fill="black" />
-                <path d="${ybrPath}" fill="white" filter="url(#ybr-inner-mask-filter)" />
-              </mask>
-            `
-            : ''
-        }
       </defs>
 
-      ${
-        roadPath
-          ? `
-            <path d="${roadPath}" fill="#243038" />
-            <path d="${roadPath}" fill="#000" filter="url(#road-inner-fill-filter)" />
-          `
-          : ''
-      }
+      ${roadPath ? `<path d="${roadPath}" fill="#243038" />` : ''}
+      ${roadInsetPath ? `<path d="${roadInsetPath}" fill="#31404a" />` : ''}
 
       ${plazaPath ? `<path d="${plazaPath}" fill="rgba(255,255,255,0.22)" />` : ''}
 
-      ${
-        ybrPath
-          ? `
-            <path d="${ybrPath}" fill="#b87400" />
-
-            <g mask="url(#ybr-inner-mask)">
-              <rect
-                x="${-patternW}"
-                y="${-patternH}"
-                width="${viewportW + patternW * 2}"
-                height="${viewportH + patternH * 2}"
-                fill="#d99500"
-              />
-              <rect
-                x="${-patternW}"
-                y="${-patternH}"
-                width="${viewportW + patternW * 2}"
-                height="${viewportH + patternH * 2}"
-                fill="url(#ybr-pattern)"
-              />
-            </g>
-          `
-          : ''
-      }
+      ${ybrPath ? `<path d="${ybrPath}" fill="#b87400" />` : ''}
+      ${ybrInsetPath ? `<path d="${ybrInsetPath}" fill="#d99500" />` : ''}
+      ${ybrInsetPath ? `<path d="${ybrInsetPath}" fill="url(#ybr-pattern)" />` : ''}
     </svg>
   `
 }
 
 function requestInfraSvgRefresh() {
   if (infraSvgRefreshRaf) return
+
   infraSvgRefreshRaf = requestAnimationFrame(() => {
     infraSvgRefreshRaf = 0
     renderInfraSvg()
   })
 }
+
 
 
 /* ===== anchors ===== */
@@ -2061,7 +2025,9 @@ function scheduleFrame() {
     updateVehicleRender()
     updateVehicleMarker(vehicle)
 
-    if (followVehicle.value && vehicle.visible && map) {
+    const riding = followVehicle.value && vehicle.visible && map
+
+    if (riding) {
       if (!rideCamera.active) {
         rideCamera.x = vehicle.x
         rideCamera.y = vehicle.y
