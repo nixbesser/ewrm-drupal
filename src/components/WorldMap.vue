@@ -1369,6 +1369,10 @@ function renderInfraSvg() {
   const mortar = Math.max(1, cellPxScreen * 0.012)
   const brickW = Math.max(10, cellPxScreen * 0.24)
   const brickH = Math.max(6, cellPxScreen * 0.11)
+
+  const ybrShoulderPx = Math.max(3, cellPxScreen * 0.055)
+  const roadShoulderPx = Math.max(2, cellPxScreen * 0.028)
+
   const stepX = brickW + mortar
   const stepY = brickH + mortar
   const patternW = stepX * 2
@@ -1446,10 +1450,47 @@ function renderInfraSvg() {
             `
             : ''
         }
+
+        <filter
+          id="ybr-shoulder-filter"
+          x="-20%"
+          y="-20%"
+          width="140%"
+          height="140%"
+          color-interpolation-filters="sRGB"
+        >
+          <feMorphology in="SourceAlpha" operator="dilate" radius="${ybrShoulderPx}" result="dilated" />
+          <feComposite in="dilated" in2="SourceAlpha" operator="out" result="ring" />
+          <feFlood flood-color="#b87400" result="color" />
+          <feComposite in="color" in2="ring" operator="in" result="shoulder" />
+        </filter>
+
+        <filter
+          id="road-shoulder-filter"
+          x="-20%"
+          y="-20%"
+          width="140%"
+          height="140%"
+          color-interpolation-filters="sRGB"
+        >
+          <feMorphology in="SourceAlpha" operator="dilate" radius="${roadShoulderPx}" result="dilated" />
+          <feComposite in="dilated" in2="SourceAlpha" operator="out" result="ring" />
+          <feFlood flood-color="#243038" result="color" />
+          <feComposite in="color" in2="ring" operator="in" result="shoulder" />
+        </filter>
+
       </defs>
 
+      ${roadPath ? `<path d="${roadPath}" fill="#000" filter="url(#road-shoulder-filter)" />` : ''}
       ${roadPath ? `<path d="${roadPath}" fill="#31404a" />` : ''}
+
       ${plazaPath ? `<path d="${plazaPath}" fill="rgba(255,255,255,0.22)" />` : ''}
+
+      ${
+        ybrPath
+          ? `<path d="${ybrPath}" fill="#000" filter="url(#ybr-shoulder-filter)" />`
+          : ''
+      }
 
       ${
         ybrPath
