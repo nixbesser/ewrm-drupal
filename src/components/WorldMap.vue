@@ -1881,11 +1881,19 @@ async function centerDeepLinkIfNeeded() {
     const bundle = String(route.params.bundle)
     const slug = String(route.params.slug)
     const resolved = await resolveObject({ bundle, slug })
+
     if (resolved?.found && resolved?.anchor) {
       const ax = Number(resolved.anchor.x)
       const ayUi = backendYToUiY(Number(resolved.anchor.y))
-      router.replace({ name: 'tile', params: { z: WORLD.z, x: ax, y: ayUi } })
+
+      await router.replace({
+        name: 'tile',
+        params: { z: WORLD.z, x: ax, y: ayUi },
+      })
+
+      return { redirected: true }
     }
+
     return null
   }
 
@@ -2071,7 +2079,9 @@ async function handleRoutePipeline() {
     (source !== 'click' && (route.name === 'tile' || route.name === 'object'))
 
   if (isDeepLinkCenterCase) {
-    await centerDeepLinkIfNeeded()
+    const deepLinkResult = await centerDeepLinkIfNeeded()
+
+    if (deepLinkResult?.redirected) return
   }
 
   if (source !== 'click' && route.name === 'tile') {

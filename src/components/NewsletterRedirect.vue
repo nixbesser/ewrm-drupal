@@ -5,7 +5,7 @@
 </template>
 
 <script setup>
-import { onMounted, watch } from 'vue'
+import { onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { resolveNewsletter } from '../api/worldApi.js'
 
@@ -32,9 +32,4 @@ async function go() {
 }
 
 onMounted(go)
-
-watch(
-  () => [route.params.key, route.params.date],
-  () => go()
-)
 </script>
