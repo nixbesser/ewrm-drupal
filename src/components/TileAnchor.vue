@@ -15,79 +15,50 @@
   </div>
 
   <section v-else class="tile-back-only" :aria-label="ariaLabel" @click.stop>
-    <div class="tile-ui back__chrome">
-      <div class="back__title">{{ backTitle }}</div>
+    <div class="tile-ui">
+      <main class="tile-panel">
+        <!-- COVER -->
 
-      <nav class="tabs tile-tabs" aria-label="Tile tabs">
-        <button
-          v-for="tdef in tabDefs"
-          :key="tdef.id"
-          class="tab"
-          :class="{ active: activeTab === tdef.id }"
-          :disabled="isTabDisabled(tdef.id)"
-          type="button"
-          @click.stop="onTabClick(tdef.id)"
-        >
-          {{ tdef.label }}
-        </button>
-      </nav>
-
-      <div class="panel tile-panel">
         <!-- EMBED -->
-        <div v-if="hasTab('embed')" v-show="activeTab === 'embed'" class="panel__body">
-          <div v-if="!embedUrl" class="back__hint">No embed_url yet.</div>
+        <div v-if="hasTab('embed')" v-show="activeTab === 'embed'" class="panel__body panel__body--embed">
+          <div v-if="!embedUrl" class="state-message">No embed yet.</div>
 
-          <div v-else>
-            <div v-if="embedState.status === 'idle'" class="back__hint">
-              Flip to load embed.
-            </div>
-
-            <div v-else-if="embedState.status === 'loading'" class="back__loading">
-              Loading embed…
-            </div>
-
-            <div v-else-if="embedState.status === 'error'" class="back__error">
-              <div><strong>Embed error</strong></div>
-              <div class="back__errorMsg">{{ embedState.error }}</div>
-              <button class="back__btn" type="button" @click.stop="reloadEmbed">
-                Retry
-              </button>
-            </div>
-
-            <div
-              v-else-if="embedState.status === 'ready' && embedState.embed?.iframe_src"
-              class="embed"
-            >
-              <iframe
-                class="embed__frame"
-                :src="embedState.embed.iframe_src"
-                :style="{ height: iframeHeight + 'px' }"
-                allowfullscreen
-                loading="lazy"
-                referrerpolicy="strict-origin-when-cross-origin"
-              ></iframe>
-
-              <div
-                class="embed__meta"
-                v-if="embedState.embed?.meta?.title || embedState.embed?.meta?.site"
-              >
-                <div class="embed__title">{{ embedState.embed?.meta?.title }}</div>
-                <div class="embed__site">{{ embedState.embed?.meta?.site }}</div>
-              </div>
-            </div>
-
-            <div v-else class="back__hint">No iframe returned.</div>
+          <div v-else-if="embedState.status === 'idle'" class="state-message">
+            Loading embed…
           </div>
+
+          <div v-else-if="embedState.status === 'loading'" class="state-message">
+            Loading embed…
+          </div>
+
+          <div v-else-if="embedState.status === 'error'" class="state-message state-message--error">
+            <div><strong>Embed error</strong></div>
+            <div class="state-message__detail">{{ embedState.error }}</div>
+            <button class="state-message__button" type="button" @click.stop="reloadEmbed">
+              Retry
+            </button>
+          </div>
+
+          <iframe
+            v-else-if="embedState.status === 'ready' && embedState.embed?.iframe_src"
+            class="embed__frame"
+            :src="embedState.embed.iframe_src"
+            allowfullscreen
+            loading="lazy"
+            referrerpolicy="strict-origin-when-cross-origin"
+          ></iframe>
+
+          <div v-else class="state-message">No iframe returned.</div>
         </div>
 
         <!-- DESCRIPTION -->
-        <div v-if="hasTab('description')" v-show="activeTab === 'description'" class="panel__body">
-          <div v-if="descriptionText" class="prose tile-body" v-html="descriptionText"></div>
-          <div v-else class="back__hint">No description yet.</div>
+        <div v-if="hasTab('description')" v-show="activeTab === 'description'" class="panel__body panel__body--description">
+          <div v-if="descriptionText" class="prose" v-html="descriptionText"></div>
+          <div v-else class="state-message">No description yet.</div>
         </div>
 
         <!-- LINKS -->
-        <div v-if="hasTab('links')" v-show="activeTab === 'links'" class="panel__body">
+        <div v-if="hasTab('links')" v-show="activeTab === 'links'" class="panel__body panel__body--links">
           <div v-if="links.length" class="links">
             <a
               v-for="l in links"
@@ -102,27 +73,25 @@
               <span class="link__url">{{ prettyUrl(l.url) }}</span>
             </a>
           </div>
-          <div v-else class="back__hint">No links yet.</div>
+          <div v-else class="state-message">No links yet.</div>
         </div>
+      </main>
 
-        <!-- COVER -->
-        <div v-if="hasTab('cover') && activeTab === 'cover'"
-        class="panel__body">
-          <div class="back__meta" style="margin-top: 10px;">
-            <div><strong>tile:</strong> {{ tile.x }},{{ tile.y }} ({{ tile.w }}×{{ tile.h }})</div>
-            <div v-if="obj?.bundle && obj?.slug">
-              <strong>object:</strong> {{ obj.bundle }} · {{ obj.slug }}
-            </div>
-            <div v-else>
-              <strong>object:</strong> none
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="back__footer">
-        EWRM · Tile · FORCE 1
-      </div>
+      <nav v-if="visibleTabDefs.length" class="tile-tabs" aria-label="Tile tabs">
+        <button
+          v-for="tdef in visibleTabDefs"
+          :key="tdef.id"
+          class="tab"
+          :class="{ active: activeTab === tdef.id }"
+          :disabled="isTabDisabled(tdef.id)"
+          type="button"
+          :aria-label="tdef.label"
+          :title="tdef.label"
+          @click.stop="onTabClick(tdef.id)"
+        >
+          <span class="tab__icon" aria-hidden="true">{{ tabIcon(tdef.id) }}</span>
+        </button>
+      </nav>
     </div>
   </section>
 </template>
@@ -228,11 +197,6 @@ const links = computed(() => {
     .filter((x) => x.url)
 })
 
-const iframeHeight = computed(() => {
-  const h = embedState.embed?.height
-  if (Number.isFinite(h) && h >= 100 && h <= 1200) return Math.round(h)
-  return 360
-})
 
 const tabDefs = computed(() => {
   return props.tabs && props.tabs.length
@@ -244,6 +208,10 @@ const tabDefs = computed(() => {
         { id: 'links', label: 'Links' },
       ]
 })
+
+// The cover is the unflipped face of the tile.
+// Bottom tabs are only for the flipped/back views.
+const visibleTabDefs = computed(() => tabDefs.value)
 
 function hasTab(id) {
   return tabDefs.value.some(tab => tab.id === id)
@@ -257,17 +225,20 @@ function isTabDisabled(id) {
 }
 
 function firstOpenableTab() {
-  for (const t of tabDefs.value) {
-    if (t.id === 'cover') continue
-    if (!isTabDisabled(t.id)) return t.id
+  const preferred = ['embed', 'description', 'links']
+
+  for (const id of preferred) {
+    if (hasTab(id) && !isTabDisabled(id)) return id
   }
-  return hasTab('cover') ? 'cover' : (tabDefs.value[0]?.id || 'cover')
+
+  return tabDefs.value.find(t => t.id !== 'cover')?.id || 'embed'
 }
 
 function sanitizeRequestedTab(requested) {
   if (
     typeof requested === 'string' &&
     requested &&
+    requested !== 'cover' &&
     hasTab(requested) &&
     !isTabDisabled(requested)
   ) {
@@ -348,12 +319,14 @@ async function onCoverTab() {
   if (url) {
     await preloadCover(url)
   }
-  emit('request-cover')
+  activeTab.value = 'cover'
+  emit('tab-change', 'cover')
 }
 
 function onTabClick(id) {
   if (id === 'cover') {
-    onCoverTab()
+    emit('request-cover')   // tells parent to unflip
+    emit('tab-change', 'cover')
     return
   }
 
@@ -362,32 +335,47 @@ function onTabClick(id) {
   emit('tab-change', next)
 }
 
-watch(
-  () => props.tile?.cover,
-  (url) => {
-    if (url) preloadCover(url)
-  },
-  { immediate: true }
-)
+function tabIcon(id) {
+  if (id === 'cover') return '←'
+  if (id === 'embed') return '▶'
+  if (id === 'description') return '☰'
+  if (id === 'links') return '↗'
+  return '•'
+}
 
 watch(
-  () => [props.tab, props.flipped, tabDefs.value.map(t => t.id).join('|'), embedUrl.value, descriptionText.value, links.value.length],
-  () => {
-    activeTab.value = sanitizeRequestedTab(props.tab)
+  () => props.flipped,
+  (isFlipped) => {
+    if (isFlipped) {
+      activeTab.value = firstOpenableTab()
+    } else {
+      activeTab.value = 'cover'
+    }
   },
   { immediate: true }
 )
 
 watch(
   () => [props.flipped, activeTab.value, embedUrl.value, hasTab('embed')],
-  ([isFlipped, tab, url, embedAllowed]) => {
-    if (!embedAllowed || !url || tab !== 'embed' || !isFlipped) {
+  ([isFlipped, tab, url, embedAllowed], oldVal = []) => {
+    const oldUrl = oldVal[2]
+
+    // Closing the tile should kill media.
+    if (!isFlipped || !embedAllowed || !url) {
       abortInFlight()
       resetStateToIdle()
       return
     }
 
-    if (embedState.status === 'idle') {
+    // If the actual media URL changes, reset.
+    if (oldUrl && oldUrl !== url) {
+      abortInFlight()
+      resetStateToIdle()
+    }
+
+    // Only initiate loading when user lands on Media.
+    // Once loaded, do NOT reset when switching to Info/Links.
+    if (tab === 'embed' && embedState.status === 'idle') {
       loadEmbed(url)
     }
   },
@@ -422,16 +410,14 @@ function hostLabel(u) {
 
 <style scoped>
 .tile-front-only,
-.tile-back-only {
+.tile-back-only,
+.tile-ui {
   width: 100%;
   height: 100%;
   overflow: hidden;
 }
 
 .tile-front-only {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
   transform: translateZ(0);
   background: rgba(0, 0, 0, 0.04);
 }
@@ -444,6 +430,11 @@ function hostLabel(u) {
   transform: translateZ(0);
   will-change: transform;
   backface-visibility: hidden;
+}
+
+.cover--back {
+  position: absolute;
+  inset: 0;
 }
 
 .fallback {
@@ -460,6 +451,11 @@ function hostLabel(u) {
   );
 }
 
+.fallback--back {
+  position: absolute;
+  inset: 0;
+}
+
 .fallback__label {
   padding: 6px 10px;
   border-radius: 999px;
@@ -470,130 +466,148 @@ function hostLabel(u) {
 }
 
 .tile-back-only {
-  background: #fff;
-  color: #111;
-}
-
-.back__chrome {
-  height: 100%;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0.02), rgba(0, 0, 0, 0));
-}
-
-.back__title {
-  font: 700 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  letter-spacing: 0.2px;
-}
-
-.tabs {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  padding-bottom: 2px;
-}
-
-.tab {
-  border: 0;
-  background: rgba(0, 0, 0, 0.06);
-  color: #111;
-  padding: 6px 10px;
-  border-radius: 10px;
-  font: 12px/1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  cursor: pointer;
-}
-
-.tab.active {
   background: #111;
   color: #fff;
 }
 
-.tab:disabled {
-  opacity: 0.35;
-  cursor: default;
+.tile-ui {
+  position: relative;
+  background: #111;
 }
 
-.panel {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  border-radius: 12px;
+.tile-panel {
+  position: absolute;
+  inset: 0 0 32px 0;
+  overflow: hidden;
 }
 
 .panel__body {
-  min-height: 100%;
-}
-
-.back__hint {
-  font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  color: rgba(0, 0, 0, 0.55);
-}
-
-.back__loading {
-  font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  color: rgba(0, 0, 0, 0.65);
-}
-
-.back__error {
-  border: 1px solid rgba(0, 0, 0, 0.10);
-  border-radius: 10px;
-  padding: 10px;
-  background: rgba(255, 0, 0, 0.03);
-}
-
-.back__errorMsg {
-  margin-top: 6px;
-  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "Courier New", monospace;
-  color: rgba(0, 0, 0, 0.72);
-  word-break: break-word;
-}
-
-.back__btn {
-  margin-top: 10px;
-  padding: 6px 10px;
-  border-radius: 10px;
-  border: 1px solid rgba(0, 0, 0, 0.15);
-  background: #fff;
-  font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  cursor: pointer;
-}
-
-.embed {
-  border: 1px solid rgba(0, 0, 0, 0.10);
-  border-radius: 12px;
+  position: absolute;
+  inset: 0;
   overflow: hidden;
-  background: #fff;
+}
+
+.panel__body--embed {
+  background: #000;
+}
+
+.panel__body--description {
+  overflow-y: auto;
+  padding: 12px;
+  background:
+    radial-gradient(circle at 16px 16px, rgba(255,255,255,0.08) 0 1px, transparent 1px),
+    linear-gradient(135deg, #5e006f, #97007f);
+  background-size: 6px 6px, auto;
+  color: #fff;
+}
+
+.panel__body--links {
+  overflow-y: auto;
+  padding: 12px;
+  background: #151515;
 }
 
 .embed__frame {
-  width: 100%;
-  border: 0;
+  position: absolute;
+  inset: 0;
   display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #000;
 }
 
-.embed__meta {
-  padding: 8px 10px;
-  border-top: 1px solid rgba(0, 0, 0, 0.08);
+.tile-tabs {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  background: #82007f;
+  box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.12) inset;
 }
 
-.embed__title {
-  font: 600 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  color: rgba(0, 0, 0, 0.80);
+.tab {
+  appearance: none;
+  border: 0;
+  flex: 1 1 0;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+  opacity: 0.74;
 }
 
-.embed__site {
-  margin-top: 2px;
-  font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  color: rgba(0, 0, 0, 0.55);
+.tab.active {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.tab:disabled {
+  opacity: 0.28;
+  cursor: default;
+}
+
+.tab__icon {
+  font: 700 15px/1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+.state-message {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  text-align: center;
+  font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: rgba(255, 255, 255, 0.72);
+  background: #111;
+}
+
+.state-message--error {
+  gap: 8px;
+  background: #160808;
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.state-message__detail {
+  max-width: 100%;
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  color: rgba(255, 255, 255, 0.68);
+  word-break: break-word;
+}
+
+.state-message__button {
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font: 700 12px/1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  cursor: pointer;
 }
 
 .prose {
-  font: 13px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  color: #111;
-  white-space: pre-wrap;
+  font: 700 13px/1.18 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: #fff;
+  text-align: left;
+}
+
+.prose :deep(p) {
+  margin: 0 0 0.8em;
+}
+
+.prose :deep(p:last-child) {
+  margin-bottom: 0;
 }
 
 .links {
@@ -607,40 +621,18 @@ function hostLabel(u) {
   gap: 2px;
   padding: 10px;
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.04);
+  background: rgba(255, 255, 255, 0.08);
   text-decoration: none;
   color: inherit;
 }
 
 .link__label {
-  font: 700 12px/1.2 system-ui;
-  color: #111;
+  font: 700 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: #fff;
 }
 
 .link__url {
-  font: 12px/1.2 system-ui;
-  color: rgba(0, 0, 0, 0.55);
-}
-
-.coverBtn {
-  border: 0;
-  background: #111;
-  color: #fff;
-  padding: 10px 12px;
-  border-radius: 12px;
-  font: 700 13px/1 system-ui;
-  cursor: pointer;
-}
-
-.back__meta {
-  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "Courier New", monospace;
-  color: rgba(0, 0, 0, 0.72);
-}
-
-.back__footer {
-  margin-top: auto;
-  font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  color: rgba(0, 0, 0, 0.50);
+  font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: rgba(255, 255, 255, 0.62);
 }
 </style>
