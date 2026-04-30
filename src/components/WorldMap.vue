@@ -1517,34 +1517,17 @@ function requestInfraSvgRefresh() {
 function tileStyle(t) {
   if (!map) return { display: 'none' }
 
-  const inPane = anchorsAreInLeafletPane()
+  const p = map.latLngToLayerPoint(tileTopLeftLatLng(t.x, t.y))
+  const cell = cellPxInLayer()
 
-  if (inPane) {
-    const cell = _cellPxLayer
-    const px = camL.px0 + (t.x - camL.xmin) * cell
-    const py = camL.py0 + (t.y - camL.ymin) * cell
-
-    const w = Math.max(1, Number(t.w || 1)) * cell
-    const h = Math.max(1, Number(t.h || 1)) * cell
-
-    return {
-      transform: `translate3d(${px}px, ${py}px, 0)`,
-      width: `${Math.round(w)}px`,
-      height: `${Math.round(h)}px`,
-      pointerEvents: t?.flippable === false ? 'none' : 'auto',
-    }
-  }
-
-  const p = map.latLngToContainerPoint(tileTopLeftLatLng(t.x, t.y))
-  const s = screenScale()
-  const w = Math.max(1, Number(t.w || 1)) * WORLD.cellPx * s
-  const h = Math.max(1, Number(t.h || 1)) * WORLD.cellPx * s
+  const w = Math.max(1, Number(t.w || 1)) * cell
+  const h = Math.max(1, Number(t.h || 1)) * cell
 
   return {
     transform: `translate3d(${p.x}px, ${p.y}px, 0)`,
-    width: `${Math.round(w)}px`,
-    height: `${Math.round(h)}px`,
-    pointerEvents: 'auto',
+    width: `${w}px`,
+    height: `${h}px`,
+    pointerEvents: t?.flippable === false ? 'none' : 'auto',
   }
 }
 
@@ -1769,6 +1752,34 @@ async function requestInfraForRide() {
     }
   } finally {
     rideInfraInFlight = false
+  }
+}
+
+/* ===== ride anchor loading ===== */
+
+let rideAnchorLastMs = 0
+let rideAnchorInFlight = false
+const RIDE_ANCHOR_THROTTLE_MS = 500
+
+async function requestAnchorsForRide() {
+  if (!map || !followVehicle.value || !vehicle.visible) return
+  if (rideAnchorInFlight) return
+
+  const now = performance.now()
+  if (now - rideAnchorLastMs < RIDE_ANCHOR_THROTTLE_MS) return
+
+  rideAnchorLastMs = now
+  rideAnchorInFlight = true
+
+  try {
+    await refreshViewport()
+  } catch (err) {
+    if (err?.name !== 'AbortError') {
+      hud.err = String(err?.message || err)
+      console.error(err)
+    }
+  } finally {
+    rideAnchorInFlight = false
   }
 }
 
@@ -2054,6 +2065,7 @@ function scheduleFrame() {
       )
 
       requestInfraForRide()
+      requestAnchorsForRide()
     }
 
     /* 🔥 CRITICAL: recompute AFTER camera move */
