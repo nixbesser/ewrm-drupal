@@ -156,7 +156,7 @@ if (dy < 0) return 0
   return vehicleLastAngle
 }
 
-const vehicleImgSrc = `${import.meta.env.BASE_URL}vehicles/silver-car.png?v=2`
+const vehicleImgSrc = `${import.meta.env.BASE_URL}vehicles/psybus1.png?v=2`
 
 function createVehicleIcon(angle = 0) {
   const src = vehicleImgSrc
@@ -1528,7 +1528,7 @@ function tileStyle(t) {
     const h = Math.max(1, Number(t.h || 1)) * cell
 
     return {
-      transform: `translate3d(${Math.round(px)}px, ${Math.round(py)}px, 0)`,
+      transform: `translate3d(${px}px, ${py}px, 0)`,
       width: `${Math.round(w)}px`,
       height: `${Math.round(h)}px`,
       pointerEvents: t?.flippable === false ? 'none' : 'auto',
@@ -1541,7 +1541,7 @@ function tileStyle(t) {
   const h = Math.max(1, Number(t.h || 1)) * WORLD.cellPx * s
 
   return {
-    transform: `translate3d(${Math.round(p.x)}px, ${Math.round(p.y)}px, 0)`,
+    transform: `translate3d(${p.x}px, ${p.y}px, 0)`,
     width: `${Math.round(w)}px`,
     height: `${Math.round(h)}px`,
     pointerEvents: 'auto',
@@ -2028,8 +2028,6 @@ function scheduleFrame() {
   raf = requestAnimationFrame(() => {
     raf = 0
 
-    updateCellPxLayer()
-    updateAnchorCameraLayer()
     updateVehicleRender()
     updateVehicleMarker(vehicle)
 
@@ -2058,7 +2056,12 @@ function scheduleFrame() {
       requestInfraForRide()
     }
 
+    /* 🔥 CRITICAL: recompute AFTER camera move */
+    updateCellPxLayer()
+    updateAnchorCameraLayer()
+
     drawGrid()
+
     requestInfraSvgRefresh()
     updateHud()
 
