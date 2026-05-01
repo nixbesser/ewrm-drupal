@@ -1,0 +1,43 @@
+world_api.viewport:
+  path: '/api/world/viewport'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\WorldApiController::viewport'
+  requirements:
+    _permission: 'access content'
+
+world_api.cell:
+  path: '/api/world/cell'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\WorldApiController::cell'
+  requirements:
+    _permission: 'access content'
+
+world_api.resolve:
+  path: '/api/world/resolve'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\WorldApiController::resolve'
+  requirements:
+    _permission: 'access content'
+
+world_api.infra:
+  path: '/api/world/infra'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\WorldApiController::infra'
+    _format: 'json'
+  requirements:
+    _permission: 'access content'
+
+world_api.embed:
+  path: '/api/embed'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\EmbedController::embed'
+  requirements:
+    _permission: 'access content'
+
+world_api.subscribe:
+  path: '/api/subscribe'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\WorldApiController::subscribe'
+  requirements:
+    _permission: 'access content'
+  methods: [POST, OPTIONS]
