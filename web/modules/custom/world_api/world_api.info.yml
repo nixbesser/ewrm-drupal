@@ -1,0 +1,8 @@
+name: 'World API'
+type: module
+description: 'Controller endpoints for EWRM world viewport/cell/resolve.'
+package: Custom
+core_version_requirement: ^10 || ^11
+dependencies:
+  - drupal:node
+  - drupal:path_alias

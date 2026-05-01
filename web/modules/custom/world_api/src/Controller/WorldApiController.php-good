@@ -12,7 +12,6 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
-use Drupal\user\Entity\User;
 
 final class WorldApiController implements ContainerInjectionInterface {
 
@@ -100,14 +99,15 @@ final class WorldApiController implements ContainerInjectionInterface {
         $aw = max(1, (int) ($tile->get('field_w')->value ?: 1));
         $ah = max(1, (int) ($tile->get('field_h')->value ?: 1));
 
-        // Quick intersection test vs viewport.
         $ax2 = $ax + $aw - 1;
         $ay2 = $ay + $ah - 1;
         $intersects =
           ($ax <= $xmax) && ($ax2 >= $xmin) &&
           ($ay <= $ymax) && ($ay2 >= $ymin);
 
-        if (!$intersects) continue;
+        if (!$intersects) {
+          continue;
+        }
 
         $cover = $this->buildTileCoverUrl($tile, $cache);
 
@@ -192,7 +192,6 @@ final class WorldApiController implements ContainerInjectionInterface {
 
     $role = (string) ($tile->get('field_role')->value ?? 'anchor');
 
-    // Infra tiles (canvas-rendered).
     if ($role === 'ybr' || $role === 'road') {
       $res = new CacheableJsonResponse([
         'z' => $z,
@@ -207,7 +206,6 @@ final class WorldApiController implements ContainerInjectionInterface {
       return $res;
     }
 
-    // Resolve anchor if this is an occupied tile pointing to an anchor.
     $anchor = $tile;
     if ($role === 'occupied') {
       if ($tile->hasField('field_anchor_ref') && !$tile->get('field_anchor_ref')->isEmpty()) {
@@ -237,9 +235,8 @@ final class WorldApiController implements ContainerInjectionInterface {
       }
     }
 
-// Determine if this anchor tile allows flipping.
-$allowFlip = $this->readBoolField($anchor, 'field_flippable', false);
-$ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'field_ddt', false);
+    $allowFlip = $this->readBoolField($anchor, 'field_flippable', false);
+    $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'field_ddt', false);
 
     $res = new CacheableJsonResponse([
       'z' => $z,
@@ -247,7 +244,6 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       'y' => $y,
       'occupied' => true,
       'role' => $role,
-
       'anchor' => [
         'x' => $ax,
         'y' => $ay,
@@ -255,18 +251,9 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
         'h' => $ah,
         'url' => "/w/{$z}/{$ax}/{$ay}",
       ],
-
       'cover' => $cover,
-
-      // IMPORTANT: "object" is preview OR full depending on ?full=1.
       'object' => $obj,
-
-      // Convenience flags for UI.
       'ddt' => $ddt,
-
-      // Only flippable if:
-      // 1) field_flippable is true
-      // 2) tile actually has content
       'flippable' => $allowFlip && ((bool) $cover || (bool) $obj),
     ]);
 
@@ -342,7 +329,9 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     $obj_nid = null;
     foreach ($candidates as $alias) {
       $internal = $this->aliasManager->getPathByAlias($alias);
-      if (!is_string($internal)) continue;
+      if (!is_string($internal)) {
+        continue;
+      }
       if (preg_match('#^/node/(\d+)$#', $internal, $m)) {
         $obj_nid = (int) $m[1];
         break;
@@ -403,112 +392,6 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     return $res;
   }
 
-  public function subscribe(Request $request) {
-    $data = json_decode($request->getContent(), TRUE);
-
-    if (empty($data['email'])) {
-      return new JsonResponse(['error' => 'Email required'], 400);
-    }
-
-    if (!empty($data['company'])) {
-      return new JsonResponse(['error' => 'Spam detected'], 400);
-    }
-
-    $email = strtolower(trim($data['email']));
-    $name = trim((string) ($data['name'] ?? ''));
-
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-      return new JsonResponse(['error' => 'Invalid email'], 400);
-    }
-
-    $apiKey = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiI0IiwianRpIjoiMGRhNzliOTExZmFkM2Q0OWNkZTM3OTA5ZjczOWQ4NjJkZWY2NzY2ZTNmNGI1OGViZTc0MzkyOGNiZTBjN2QyYzBiNTk4OTBiMjFhYTNkMjEiLCJpYXQiOjE3NzMwMjUyMjMuMDYyMDI5LCJuYmYiOjE3NzMwMjUyMjMuMDYyMDMxLCJleHAiOjQ5Mjg2OTg4MjMuMDU3NDM4LCJzdWIiOiIyMTYwMjMwIiwic2NvcGVzIjpbXX0.QWdA83xypeWh9EJEPgPDz41G-bt6ZMFFxaGHQffRTyQO87jQO-UK6jfeIM8xGC0dENhjhYnF-JlJ9S9NpGjbIGPaobSKuZ8lHEdI_8eEZx9urTCFtKCSrFykljp33klCuUx6zT3Jd4mo4NIPCJdKZi_p7ROXqrXFmvIPgMJ79Xqvr7i_XwzlFVe13Mi3XeSL30ZKGR7YP9jWCKkAUhXlN_-4PMqHuJ4UWpeBkwQwLz_5LuWwd_eani9UH9nKBXAThvWNx_te30oNFPkrTINhfz_ZW9gvuR_iWHSY8fkQmDvbG0xkVJa_IrYmFXC6X9M82RjYFrNg5OVOof4z5MkMfvJKMxPHPzXTl728zaI0kK-T3pMO7eij79oxegqj8KMOzxIn57WociozBZdpzKan2c07nGrf_K-ZVgHtbXpGbPSOCtqR2eQUCuJpXsDF8kk7h07MRHjU-XIqbD_3f4_oOU-d_KMV3kgE2yQn0kKnd6MIezK6e_K6u3CW9nzFEzBOuOoEZtJtuZhd3WbgTSMUZFUJjNPLwnHTjVrE1YEUjvHwIU64ngYF7uqzbTsZ3OoujBSWUmUSLMR_webDIZ36OW8Xm4nDO3volWVEzT6prhajwtyA41poqj8jFIwOavt3kjVhYb4YTfieoi-p-4UBIsnOjN_L45OegMa_dj7pa0M';
-    if (!$apiKey) {
-      return new JsonResponse(['error' => 'MAILERLITE_API_KEY missing'], 500);
-    }
-
-    $payload = [
-      'email' => $email,
-      'fields' => [
-        'name' => $name,
-      ],
-      'status' => 'unconfirmed',
-    ];
-
-    $ch = curl_init('https://connect.mailerlite.com/api/subscribers');
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
-    curl_setopt($ch, CURLOPT_POST, TRUE);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-      "Authorization: Bearer {$apiKey}",
-      'Content-Type: application/json',
-      'Accept: application/json',
-    ]);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-
-    $result = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlError = curl_error($ch);
-    curl_close($ch);
-
-    $response = json_decode($result, TRUE);
-
-    if ($curlError) {
-      return new JsonResponse([
-        'error' => 'MailerLite CURL error',
-        'details' => $curlError,
-      ], 502);
-    }
-
-    if ($httpCode < 200 || $httpCode >= 300) {
-      return new JsonResponse([
-        'error' => 'MailerLite API error',
-        'http_code' => $httpCode,
-        'response' => $response,
-        'raw' => $result,
-      ], 502);
-    }
-
-    $subscriberId = $response['data']['id'] ?? NULL;
-    if (!$subscriberId) {
-      return new JsonResponse([
-        'error' => 'MailerLite returned no subscriber id',
-        'response' => $response,
-        'raw' => $result,
-      ], 502);
-    }
-
-    // Only after MailerLite succeeds do we create/update Drupal user.
-    $storage = \Drupal::entityTypeManager()->getStorage('user');
-    $users = $storage->loadByProperties(['mail' => $email]);
-    $user = $users ? reset($users) : NULL;
-
-    if (!$user) {
-      $base = preg_replace('/[^a-z0-9_]+/i', '_', explode('@', $email)[0]);
-      $base = trim($base ?: 'user', '_');
-      $username = $base;
-      $i = 1;
-
-      while ($storage->loadByProperties(['name' => $username])) {
-        $username = $base . '_' . $i;
-        $i++;
-      }
-
-      $user = User::create([
-        'name' => $username,
-        'mail' => $email,
-        'status' => 1,
-      ]);
-    }
-
-    $user->set('field_newsletter_status', 'subscribed');
-    $user->set('field_mailerlite_id', $subscriberId);
-    $user->save();
-
-    return new JsonResponse([
-      'success' => TRUE,
-      'mailerlite_id' => $subscriberId,
-    ]);
-  }
-
   // ----------------------------
   // Object builders (Preview/Full)
   // ----------------------------
@@ -522,7 +405,6 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       'slug' => $this->slugForNode((int) $node->id()),
       'title' => (string) $node->label(),
       'path' => $this->aliasManager->getAliasByPath('/node/' . $node->id()),
-      'cover' => $this->buildEntityCoverUrl($node, $cache),
     ];
 
     $embed = $this->readFirstLinkUrl($node, ['field_embed_url', 'field_media_url']);
@@ -535,15 +417,9 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     $cache->addCacheableDependency($node);
 
     $payload = $this->buildObjectPreview($node, $cache);
-
-    // Description (prefer field_description, fallback to body).
     $payload['description'] = $this->readDescription($node);
-
-    // Embed URL + Start
     $payload['embed_url'] = $this->readFirstLinkUrl($node, ['field_embed_url', 'field_media_url']) ?: null;
     $payload['embed_start'] = $this->readInt($node, ['field_embed_start'], 0);
-
-    // Links (multi-value)
     $payload['links'] = $this->readLinks($node, ['field_links']);
 
     return $payload;
@@ -553,13 +429,28 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
   // Tile helpers
   // ----------------------------
 
-  private function buildEntityCoverUrl($entity, CacheableMetadata $cache): ?string {
-    if (!$entity->hasField('field_cover') || $entity->get('field_cover')->isEmpty()) {
+  private function rewriteToMediaHost(string $absoluteUrl): string {
+    $parts = parse_url($absoluteUrl);
+    if (!$parts || empty($parts['path'])) {
+      return $absoluteUrl;
+    }
+
+    if (!str_starts_with($parts['path'], '/sites/default/files/')) {
+      return $absoluteUrl;
+    }
+
+    return 'https://media.ewrm.io' . $parts['path'];
+  }
+
+  private function buildTileCoverUrl($tile, CacheableMetadata $cache): ?string {
+    if (!$tile->hasField('field_cover') || $tile->get('field_cover')->isEmpty()) {
       return null;
     }
 
-    $media = $entity->get('field_cover')->entity;
-    if (!$media) return null;
+    $media = $tile->get('field_cover')->entity;
+    if (!$media) {
+      return null;
+    }
     $cache->addCacheableDependency($media);
 
     if (!$media->hasField('field_media_image') || $media->get('field_media_image')->isEmpty()) {
@@ -567,38 +458,13 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     }
 
     $file = $media->get('field_media_image')->entity;
-    if (!$file) return null;
+    if (!$file) {
+      return null;
+    }
     $cache->addCacheableDependency($file);
 
-    return $this->fileUrlGenerator->generateAbsoluteString($file->getFileUri());
-  }
-
-  private function buildTileCoverUrl($tile, CacheableMetadata $cache): ?string {
-    // 1) Tile-level override first.
-    if ($tile->hasField('field_cover_override') && !$tile->get('field_cover_override')->isEmpty()) {
-      $media = $tile->get('field_cover_override')->entity;
-      if ($media) {
-        $cache->addCacheableDependency($media);
-
-        if ($media->hasField('field_media_image') && !$media->get('field_media_image')->isEmpty()) {
-          $file = $media->get('field_media_image')->entity;
-          if ($file) {
-            $cache->addCacheableDependency($file);
-            return $this->fileUrlGenerator->generateAbsoluteString($file->getFileUri());
-          }
-        }
-      }
-    }
-
-    // 2) Fallback to the referenced object's permanent cover.
-    if ($tile->hasField('field_object_reference') && !$tile->get('field_object_reference')->isEmpty()) {
-      $object = $tile->get('field_object_reference')->entity;
-      if ($object) {
-        return $this->buildEntityCoverUrl($object, $cache);
-      }
-    }
-
-    return null;
+    $url = $this->fileUrlGenerator->generateAbsoluteString($file->getFileUri());
+    return $this->rewriteToMediaHost($url);
   }
 
   // ----------------------------
@@ -606,14 +472,12 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
   // ----------------------------
 
   private function readDescription($node): string {
-    // Preferred: field_description (formatted long).
     if ($node->hasField('field_description') && !$node->get('field_description')->isEmpty()) {
       $item = $node->get('field_description')->first();
       $val = (string) ($item?->value ?? '');
       return trim($val);
     }
 
-    // Fallback: body summary/value.
     if ($node->hasField('body') && !$node->get('body')->isEmpty()) {
       $item = $node->get('body')->first();
       $val = (string) ($item?->summary ?: $item?->value ?: '');
@@ -629,7 +493,9 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
         $it = $node->get($field)->first();
         $uri = (string) ($it?->uri ?? '');
         $url = $this->normalizeLinkUri($uri);
-        if ($url !== '') return $url;
+        if ($url !== '') {
+          return $url;
+        }
       }
     }
     return null;
@@ -639,8 +505,12 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     foreach ($fieldNames as $field) {
       if ($node->hasField($field) && !$node->get($field)->isEmpty()) {
         $v = $node->get($field)->value;
-        if ($v === null || $v === '') continue;
-        if (preg_match('/^-?\d+$/', (string) $v)) return (int) $v;
+        if ($v === null || $v === '') {
+          continue;
+        }
+        if (preg_match('/^-?\d+$/', (string) $v)) {
+          return (int) $v;
+        }
       }
     }
     return $default;
@@ -648,13 +518,17 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
 
   private function readLinks($node, array $fieldNames): array {
     foreach ($fieldNames as $field) {
-      if (!$node->hasField($field) || $node->get($field)->isEmpty()) continue;
+      if (!$node->hasField($field) || $node->get($field)->isEmpty()) {
+        continue;
+      }
 
       $out = [];
       foreach ($node->get($field) as $item) {
         $uri = (string) ($item?->uri ?? '');
         $url = $this->normalizeLinkUri($uri);
-        if ($url === '') continue;
+        if ($url === '') {
+          continue;
+        }
 
         $label = (string) ($item?->title ?? '');
         $out[] = [
@@ -675,7 +549,9 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
    */
   private function normalizeLinkUri(string $uri): string {
     $uri = trim($uri);
-    if ($uri === '') return '';
+    if ($uri === '') {
+      return '';
+    }
 
     if (preg_match('#^https?://#i', $uri)) {
       return $uri;
@@ -694,7 +570,6 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       }
     }
 
-    // Fallback: return as-is (still useful for debugging).
     return $uri;
   }
 
@@ -704,14 +579,18 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
 
   private function boolParam(Request $request, string $name, bool $default = false): bool {
     $v = $request->query->get($name);
-    if ($v === null || $v === '') return $default;
+    if ($v === null || $v === '') {
+      return $default;
+    }
     return ((int) $v) === 1 || $v === 'true';
   }
 
   private function intParam(Request $request, string $name, ?int $default = null): int {
     $v = $request->query->get($name);
     if ($v === null || $v === '') {
-      if ($default === null) throw new BadRequestHttpException("Missing param: {$name}");
+      if ($default === null) {
+        throw new BadRequestHttpException("Missing param: {$name}");
+      }
       return $default;
     }
     if (!preg_match('/^-?\d+$/', (string) $v)) {
@@ -722,7 +601,9 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
 
   private function intOptionalParam(Request $request, string $name, ?int $default = null): ?int {
     $v = $request->query->get($name);
-    if ($v === null || $v === '') return $default;
+    if ($v === null || $v === '') {
+      return $default;
+    }
     if (!preg_match('/^-?\d+$/', (string) $v)) {
       throw new BadRequestHttpException("Invalid int param: {$name}");
     }
@@ -732,7 +613,9 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
   private function slugForNode(int $nid): string {
     $alias = $this->aliasManager->getAliasByPath("/node/{$nid}");
     $alias = trim($alias, '/');
-    if ($alias === '') return (string) $nid;
+    if ($alias === '') {
+      return (string) $nid;
+    }
     $parts = explode('/', $alias);
     return end($parts) ?: (string) $nid;
   }
@@ -750,6 +633,5 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     $value = (string) ($items->first()?->value ?? '');
     return $value === '1';
   }
-
 
 }
