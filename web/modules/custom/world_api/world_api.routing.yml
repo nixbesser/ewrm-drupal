@@ -41,3 +41,10 @@ world_api.subscribe:
   requirements:
     _permission: 'access content'
   methods: [POST, OPTIONS]
+
+world_api.gates:
+  path: '/api/world/gates'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\WorldApiController::gates'
+  requirements:
+    _permission: 'access content'

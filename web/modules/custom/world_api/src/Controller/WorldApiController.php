@@ -322,6 +322,85 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     return $res;
   }
 
+
+/**
+   * GET /api/world/gates?z=&xmin=&xmax=&ymin=&ymax=
+   */
+  public function gates(Request $request): JsonResponse {
+    $z = $this->intOptionalParam($request, 'z', 10);
+    $xmin = $this->intParam($request, 'xmin');
+    $xmax = $this->intParam($request, 'xmax');
+    $ymin = $this->intParam($request, 'ymin');
+    $ymax = $this->intParam($request, 'ymax');
+  
+    $storage = $this->entityTypeManager->getStorage('node');
+  
+    $nids = $storage->getQuery()
+    ->accessCheck(TRUE)
+    ->condition('type', 'biome_gate')
+    ->condition('status', 1)
+    ->condition('field_z', $z)
+    ->condition('field_x', $xmax, '<=')
+    ->condition('field_y', $ymax, '<=')
+    ->execute();
+  
+    $cache = new CacheableMetadata();
+    $cache->setCacheContexts(['url.query_args']);
+  
+    $out = [];
+  
+    if ($nids) {
+      $nodes = $storage->loadMultiple($nids);
+  
+      foreach ($nodes as $node) {
+        $cache->addCacheableDependency($node);
+  
+        $x = (int) ($node->get('field_x')->value ?? 0);
+        $y = (int) ($node->get('field_y')->value ?? 0);
+        $w = max(1, (int) ($node->get('field_w')->value ?: 2));
+        $h = max(1, (int) ($node->get('field_h')->value ?: 2));
+  
+        $x2 = $x + $w - 1;
+        $y2 = $y + $h - 1;
+  
+        // viewport intersection
+        if ($x > $xmax || $x2 < $xmin || $y > $ymax || $y2 < $ymin) {
+          continue;
+        }
+  
+        $src = null;
+  
+        if ($node->hasField('field_gate_image') && !$node->get('field_gate_image')->isEmpty()) {
+          $media = $node->get('field_gate_image')->entity;
+          if ($media) {
+            $cache->addCacheableDependency($media);
+  
+            if ($media->hasField('field_media_image') && !$media->get('field_media_image')->isEmpty()) {
+              $file = $media->get('field_media_image')->entity;
+              if ($file) {
+                $cache->addCacheableDependency($file);
+                $src = $this->fileUrlGenerator->generateAbsoluteString($file->getFileUri());
+              }
+            }
+          }
+        }
+  
+        $out[] = [
+          'x' => $x,
+          'y' => $y,
+          'w' => $w,
+          'h' => $h,
+          'biome' => (string) ($node->get('field_biome_key')->value ?? ''),
+          'direction' => (string) ($node->get('field_direction')->value ?? ''),
+          'src' => $src,
+        ];
+      }
+    }
+  
+    $res = new CacheableJsonResponse($out);
+    $res->addCacheableDependency($cache);
+    return $res;
+  }
   /**
    * GET /api/world/resolve?bundle=&slug=
    */
