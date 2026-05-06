@@ -120,8 +120,15 @@ final class WorldApiController implements ContainerInjectionInterface {
           }
         }
 
+        $display_mode = $this->readStringField($tile, 'field_tile_display_mode', 'cover');
+        $canonical = $this->readBoolFieldDefault($tile, 'field_is_canonical', true);
         $flippable = $this->readBoolField($tile, 'field_flippable', false);
         $ddt = $this->readBoolField($tile, 'field_ddt', false);
+
+        // Song layout tiles are playable 2x1 media+info tiles, not flip cards.
+        if (in_array($display_mode, ['song', 'newsletter'], TRUE)) {
+          $flippable = false;
+        }
 
         $anchors[] = [
           'x' => $ax,
@@ -129,6 +136,8 @@ final class WorldApiController implements ContainerInjectionInterface {
           'w' => $aw,
           'h' => $ah,
           'cover' => $cover,
+          'display_mode' => $display_mode,
+          'canonical' => $canonical,
           'flippable' => $flippable,
           'ddt' => $ddt,
           'object' => $obj_preview,
@@ -238,6 +247,8 @@ final class WorldApiController implements ContainerInjectionInterface {
     }
 
 // Determine if this anchor tile allows flipping.
+$display_mode = $this->readStringField($anchor, 'field_tile_display_mode', 'cover');
+$canonical = $this->readBoolFieldDefault($anchor, 'field_is_canonical', true);
 $allowFlip = $this->readBoolField($anchor, 'field_flippable', false);
 $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'field_ddt', false);
 
@@ -257,6 +268,8 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       ],
 
       'cover' => $cover,
+      'display_mode' => $display_mode,
+      'canonical' => $canonical,
 
       // IMPORTANT: "object" is preview OR full depending on ?full=1.
       'object' => $obj,
@@ -267,7 +280,10 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       // Only flippable if:
       // 1) field_flippable is true
       // 2) tile actually has content
-      'flippable' => $allowFlip && ((bool) $cover || (bool) $obj),
+      // 3) this is not a dedicated song layout tile
+      'flippable' => in_array($display_mode, ['song', 'newsletter'], TRUE)
+      ? false
+      : ($allowFlip && ((bool) $cover || (bool) $obj)),
     ]);
 
     $res->addCacheableDependency($cache);
@@ -401,6 +417,48 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     $res->addCacheableDependency($cache);
     return $res;
   }
+  
+  /**
+   * GET /api/world/resolve-gate?key=
+   */
+  public function resolveGate(Request $request): JsonResponse {
+    $key = trim((string) $request->query->get('key', ''));
+  
+    if ($key === '') {
+      return new JsonResponse(['found' => false], 200);
+    }
+  
+    $storage = $this->entityTypeManager->getStorage('node');
+  
+    $nids = $storage->getQuery()
+      ->accessCheck(TRUE)
+      ->condition('type', 'biome_gate')
+      ->condition('status', 1)
+      ->condition('field_biome_key', $key)
+      ->range(0, 1)
+      ->execute();
+  
+    if (!$nids) {
+      return new JsonResponse(['found' => false], 200);
+    }
+  
+    $node = $storage->load(reset($nids));
+  
+    $x = (int) ($node->get('field_x')->value ?? 0);
+    $y = (int) ($node->get('field_y')->value ?? 0);
+    $z = (int) ($node->get('field_z')->value ?? 10);
+  
+    return new JsonResponse([
+      'found' => true,
+      'anchor' => [
+        'x' => $x,
+        'y' => $y,
+        'w' => max(1, (int) ($node->get('field_w')->value ?: 2)),
+        'h' => max(1, (int) ($node->get('field_h')->value ?: 2)),
+        'url' => "/w/{$z}/{$x}/{$y}",
+      ],
+    ]);
+  }
   /**
    * GET /api/world/resolve?bundle=&slug=
    */
@@ -441,20 +499,26 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       ->condition('field_z', $z)
       ->condition('field_role', 'anchor')
       ->condition('field_object_reference', $obj_nid)
-      ->range(0, 1)
       ->execute();
 
     if (!$tile_nids) {
       return new JsonResponse(['found' => false, 'nid' => $obj_nid], 200);
     }
 
-    $tile = $storage->load(reset($tile_nids));
+    $tiles = $storage->loadMultiple($tile_nids);
+    $tile = $this->pickBestObjectTile($tiles);
+
+    if (!$tile) {
+      return new JsonResponse(['found' => false, 'nid' => $obj_nid], 200);
+    }
 
     $cache = new CacheableMetadata();
     $cache->setCacheContexts(['url.query_args']);
     $cache->addCacheableDependency($tile);
 
     $cover = $this->buildTileCoverUrl($tile, $cache);
+    $display_mode = $this->readStringField($tile, 'field_tile_display_mode', 'cover');
+    $canonical = $this->readBoolFieldDefault($tile, 'field_is_canonical', true);
 
     $obj = null;
     if ($tile->hasField('field_object_reference') && !$tile->get('field_object_reference')->isEmpty()) {
@@ -474,6 +538,8 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
         'w' => max(1, (int) ($tile->get('field_w')->value ?: 1)),
         'h' => max(1, (int) ($tile->get('field_h')->value ?: 1)),
         'cover' => $cover,
+        'display_mode' => $display_mode,
+        'canonical' => $canonical,
         'object' => $obj,
       ],
     ]);
@@ -606,6 +672,7 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
 
     $embed = $this->readFirstLinkUrl($node, ['field_embed_url', 'field_media_url']);
     $base['embed_url'] = $embed ?: null;
+    $base['embed_start'] = $this->readInt($node, ['field_embed_start'], 0);
 
     return $base;
   }
@@ -814,6 +881,62 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     if ($alias === '') return (string) $nid;
     $parts = explode('/', $alias);
     return end($parts) ?: (string) $nid;
+  }
+
+  private function readStringField($entity, string $fieldName, string $default = ''): string {
+    if (!$entity || !$entity->hasField($fieldName)) {
+      return $default;
+    }
+
+    $items = $entity->get($fieldName);
+    if ($items->isEmpty()) {
+      return $default;
+    }
+
+    $value = trim((string) ($items->first()?->value ?? ''));
+    return $value !== '' ? $value : $default;
+  }
+
+  private function readBoolFieldDefault($entity, string $fieldName, bool $default = false): bool {
+    if (!$entity || !$entity->hasField($fieldName)) {
+      return $default;
+    }
+
+    $items = $entity->get($fieldName);
+    if ($items->isEmpty()) {
+      return $default;
+    }
+
+    $value = (string) ($items->first()?->value ?? '');
+    if ($value === '') {
+      return $default;
+    }
+
+    return $value === '1';
+  }
+
+  private function pickBestObjectTile(array $tiles) {
+    $best = null;
+    $bestScore = -1;
+
+    foreach ($tiles as $tile) {
+      if (!$tile) continue;
+
+      $displayMode = $this->readStringField($tile, 'field_tile_display_mode', 'cover');
+      $canonical = $this->readBoolFieldDefault($tile, 'field_is_canonical', true);
+
+      $score = 0;
+      if ($canonical) $score += 100;
+      if ($displayMode === 'song') $score += 50;
+      if ($displayMode === 'cover') $score += 10;
+
+      if ($score > $bestScore) {
+        $best = $tile;
+        $bestScore = $score;
+      }
+    }
+
+    return $best;
   }
 
   private function readBoolField($entity, string $fieldName, bool $default = false): bool {
