@@ -48,3 +48,10 @@ world_api.gates:
     _controller: '\Drupal\world_api\Controller\WorldApiController::gates'
   requirements:
     _permission: 'access content'
+    
+world_api.resolve_gate:
+    path: '/api/world/resolve-gate'
+    defaults:
+      _controller: '\Drupal\world_api\Controller\WorldApiController::resolveGate'
+    requirements:
+      _permission: 'access content'
