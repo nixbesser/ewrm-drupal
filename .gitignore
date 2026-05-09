@@ -33,3 +33,5 @@ dist-ssr/
 *~
 *~good
 *~localgood
+
+/web/sites/default/settings.local.php

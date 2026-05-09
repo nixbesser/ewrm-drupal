@@ -13,6 +13,7 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Drupal\user\Entity\User;
+use Drupal\Core\Site\Settings;
 
 final class WorldApiController implements ContainerInjectionInterface {
 
@@ -23,6 +24,7 @@ final class WorldApiController implements ContainerInjectionInterface {
     private readonly EntityTypeManagerInterface $entityTypeManager,
     private readonly AliasManagerInterface $aliasManager,
     private readonly FileUrlGeneratorInterface $fileUrlGenerator,
+    private readonly Settings $settings,
   ) {}
 
   public static function create(ContainerInterface $container): self {
@@ -30,6 +32,7 @@ final class WorldApiController implements ContainerInjectionInterface {
       $container->get('entity_type.manager'),
       $container->get('path_alias.manager'),
       $container->get('file_url_generator'),
+      $container->get('settings'),
     );
   }
 
@@ -126,7 +129,7 @@ final class WorldApiController implements ContainerInjectionInterface {
         $ddt = $this->readBoolField($tile, 'field_ddt', false);
 
         // Song layout tiles are playable 2x1 media+info tiles, not flip cards.
-        if (in_array($display_mode, ['song', 'newsletter'], TRUE)) {
+        if (in_array($display_mode, ['song', 'newsletter', 'media_tile', 'video_tile'], TRUE)) {
           $flippable = false;
         }
 
@@ -281,9 +284,7 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       // 1) field_flippable is true
       // 2) tile actually has content
       // 3) this is not a dedicated song layout tile
-      'flippable' => in_array($display_mode, ['song', 'newsletter'], TRUE)
-      ? false
-      : ($allowFlip && ((bool) $cover || (bool) $obj)),
+      'flippable' => (in_array($display_mode, ['song', 'newsletter', 'media_tile', 'video_tile'], TRUE)) ? false : ($allowFlip && ((bool) $cover || (bool) $obj)),
     ]);
 
     $res->addCacheableDependency($cache);
@@ -362,6 +363,14 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
   
     $cache = new CacheableMetadata();
     $cache->setCacheContexts(['url.query_args']);
+    
+    // Important for newly-created biome_gate nodes.
+    // Without this, an old viewport response can stay cached and miss a new gate.
+    $cache->addCacheTags(['node_list:biome_gate']);
+    
+    // During active layout work, disable endpoint caching.
+    // Later we can relax this to a short max-age if needed.
+    $cache->setCacheMaxAge(0);
   
     $out = [];
   
@@ -565,8 +574,10 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
       return new JsonResponse(['error' => 'Invalid email'], 400);
     }
-
-    $apiKey = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiI0IiwianRpIjoiMGRhNzliOTExZmFkM2Q0OWNkZTM3OTA5ZjczOWQ4NjJkZWY2NzY2ZTNmNGI1OGViZTc0MzkyOGNiZTBjN2QyYzBiNTk4OTBiMjFhYTNkMjEiLCJpYXQiOjE3NzMwMjUyMjMuMDYyMDI5LCJuYmYiOjE3NzMwMjUyMjMuMDYyMDMxLCJleHAiOjQ5Mjg2OTg4MjMuMDU3NDM4LCJzdWIiOiIyMTYwMjMwIiwic2NvcGVzIjpbXX0.QWdA83xypeWh9EJEPgPDz41G-bt6ZMFFxaGHQffRTyQO87jQO-UK6jfeIM8xGC0dENhjhYnF-JlJ9S9NpGjbIGPaobSKuZ8lHEdI_8eEZx9urTCFtKCSrFykljp33klCuUx6zT3Jd4mo4NIPCJdKZi_p7ROXqrXFmvIPgMJ79Xqvr7i_XwzlFVe13Mi3XeSL30ZKGR7YP9jWCKkAUhXlN_-4PMqHuJ4UWpeBkwQwLz_5LuWwd_eani9UH9nKBXAThvWNx_te30oNFPkrTINhfz_ZW9gvuR_iWHSY8fkQmDvbG0xkVJa_IrYmFXC6X9M82RjYFrNg5OVOof4z5MkMfvJKMxPHPzXTl728zaI0kK-T3pMO7eij79oxegqj8KMOzxIn57WociozBZdpzKan2c07nGrf_K-ZVgHtbXpGbPSOCtqR2eQUCuJpXsDF8kk7h07MRHjU-XIqbD_3f4_oOU-d_KMV3kgE2yQn0kKnd6MIezK6e_K6u3CW9nzFEzBOuOoEZtJtuZhd3WbgTSMUZFUJjNPLwnHTjVrE1YEUjvHwIU64ngYF7uqzbTsZ3OoujBSWUmUSLMR_webDIZ36OW8Xm4nDO3volWVEzT6prhajwtyA41poqj8jFIwOavt3kjVhYb4YTfieoi-p-4UBIsnOjN_L45OegMa_dj7pa0M';
+    
+    $mailerlite = $this->settings->get('mailerlite', []);
+    $apiKey = is_array($mailerlite) ? (string) ($mailerlite['api_key'] ?? '') : '';
+    
     if (!$apiKey) {
       return new JsonResponse(['error' => 'MAILERLITE_API_KEY missing'], 500);
     }
@@ -928,6 +939,9 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       $score = 0;
       if ($canonical) $score += 100;
       if ($displayMode === 'song') $score += 50;
+      if ($displayMode === 'newsletter') $score += 40;
+      if ($displayMode === 'media_tile') $score += 45;
+      if ($displayMode === 'video_tile') $score += 45;
       if ($displayMode === 'cover') $score += 10;
 
       if ($score > $bestScore) {
