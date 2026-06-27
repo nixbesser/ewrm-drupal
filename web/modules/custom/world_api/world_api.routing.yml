@@ -34,24 +34,25 @@ world_api.embed:
   requirements:
     _permission: 'access content'
 
-world_api.subscribe:
-  path: '/api/subscribe'
-  defaults:
-    _controller: '\Drupal\world_api\Controller\WorldApiController::subscribe'
-  requirements:
-    _permission: 'access content'
-  methods: [POST, OPTIONS]
-
 world_api.gates:
   path: '/api/world/gates'
   defaults:
     _controller: '\Drupal\world_api\Controller\WorldApiController::gates'
   requirements:
     _permission: 'access content'
-    
+
 world_api.resolve_gate:
     path: '/api/world/resolve-gate'
     defaults:
       _controller: '\Drupal\world_api\Controller\WorldApiController::resolveGate'
     requirements:
       _permission: 'access content'
+
+world_api.newsletter:
+  path: '/api/world/newsletter'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\WorldApiController::newsletter'
+  requirements:
+    _permission: 'access content'
+  methods: [GET, OPTIONS]
+

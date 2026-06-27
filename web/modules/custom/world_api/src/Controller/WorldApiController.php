@@ -12,8 +12,6 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
-use Drupal\user\Entity\User;
-use Drupal\Core\Site\Settings;
 
 final class WorldApiController implements ContainerInjectionInterface {
 
@@ -24,7 +22,6 @@ final class WorldApiController implements ContainerInjectionInterface {
     private readonly EntityTypeManagerInterface $entityTypeManager,
     private readonly AliasManagerInterface $aliasManager,
     private readonly FileUrlGeneratorInterface $fileUrlGenerator,
-    private readonly Settings $settings,
   ) {}
 
   public static function create(ContainerInterface $container): self {
@@ -32,7 +29,6 @@ final class WorldApiController implements ContainerInjectionInterface {
       $container->get('entity_type.manager'),
       $container->get('path_alias.manager'),
       $container->get('file_url_generator'),
-      $container->get('settings'),
     );
   }
 
@@ -41,6 +37,10 @@ final class WorldApiController implements ContainerInjectionInterface {
    * (also supports xmin/xmax/ymin/ymax for legacy callers)
    */
   public function viewport(Request $request): JsonResponse {
+    if ($denied = $this->requireBetaAccess()) {
+      return $denied;
+    }
+
     $z = $this->intOptionalParam($request, 'z', 10);
 
     $x = $this->intOptionalParam($request, 'x');
@@ -91,6 +91,11 @@ final class WorldApiController implements ContainerInjectionInterface {
     $cache = new CacheableMetadata();
     $cache->setCacheContexts(['url.query_args']);
 
+    // Tile placement changes frequently during world-building.
+    // Keep viewport responses from serving stale anchor/empty results.
+    $cache->addCacheTags(['node_list:tile']);
+    $cache->setCacheMaxAge(0);
+
     $anchors = [];
     if ($nids) {
       $tiles = $storage->loadMultiple($nids);
@@ -128,9 +133,16 @@ final class WorldApiController implements ContainerInjectionInterface {
         $flippable = $this->readBoolField($tile, 'field_flippable', false);
         $ddt = $this->readBoolField($tile, 'field_ddt', false);
 
-        // Song layout tiles are playable 2x1 media+info tiles, not flip cards.
-        if (in_array($display_mode, ['song', 'newsletter', 'media_tile', 'video_tile'], TRUE)) {
+        $hasInteractiveMode = in_array($display_mode, ['graffiti_wall'], TRUE);
+
+        // Song/layout media tiles are playable surfaces, not flip cards.
+        // Interactive utility tiles, such as graffiti_wall, may flip even without
+        // cover/object content because the UI itself is the content.
+        if (in_array($display_mode, ['song', 'newsletter', 'media_tile', 'video_tile', 'graffiti_wall'], TRUE)) {
           $flippable = false;
+        }
+        elseif ($hasInteractiveMode) {
+          $flippable = true;
         }
 
         $anchors[] = [
@@ -167,6 +179,10 @@ final class WorldApiController implements ContainerInjectionInterface {
    * GET /api/world/cell?x=&y=&full=1
    */
   public function cell(Request $request): JsonResponse {
+    if ($denied = $this->requireBetaAccess()) {
+      return $denied;
+    }
+
     $z = $this->intOptionalParam($request, 'z', 10);
     $x = $this->intParam($request, 'x');
     $y = $this->intParam($request, 'y');
@@ -186,6 +202,10 @@ final class WorldApiController implements ContainerInjectionInterface {
 
     $cache = new CacheableMetadata();
     $cache->setCacheContexts(['url.query_args']);
+
+    // Prevent stale empty-cell responses after adding/publishing tiles.
+    $cache->addCacheTags(['node_list:tile']);
+    $cache->setCacheMaxAge(0);
 
     if (!$nids) {
       $res = new CacheableJsonResponse([
@@ -253,6 +273,7 @@ final class WorldApiController implements ContainerInjectionInterface {
 $display_mode = $this->readStringField($anchor, 'field_tile_display_mode', 'cover');
 $canonical = $this->readBoolFieldDefault($anchor, 'field_is_canonical', true);
 $allowFlip = $this->readBoolField($anchor, 'field_flippable', false);
+$hasInteractiveMode = in_array($display_mode, ['graffiti_wall'], TRUE);
 $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'field_ddt', false);
 
     $res = new CacheableJsonResponse([
@@ -284,7 +305,7 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       // 1) field_flippable is true
       // 2) tile actually has content
       // 3) this is not a dedicated song layout tile
-      'flippable' => (in_array($display_mode, ['song', 'newsletter', 'media_tile', 'video_tile'], TRUE)) ? false : ($allowFlip && ((bool) $cover || (bool) $obj)),
+      'flippable' => (in_array($display_mode, ['song', 'newsletter', 'media_tile', 'video_tile'], TRUE)) ? false : ($allowFlip && ((bool) $cover || (bool) $obj || $hasInteractiveMode)),
     ]);
 
     $res->addCacheableDependency($cache);
@@ -295,6 +316,10 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
    * GET /api/world/infra?z=&xmin=&xmax=&ymin=&ymax=
    */
   public function infra(Request $request): JsonResponse {
+    if ($denied = $this->requireBetaAccess()) {
+      return $denied;
+    }
+
     $z = $this->intOptionalParam($request, 'z', 10);
     $xmin = $this->intParam($request, 'xmin');
     $xmax = $this->intParam($request, 'xmax');
@@ -315,6 +340,10 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
 
     $cache = new CacheableMetadata();
     $cache->setCacheContexts(['url.query_args']);
+
+    // Road/YBR placement is tile-backed; avoid stale infra during layout work.
+    $cache->addCacheTags(['node_list:tile']);
+    $cache->setCacheMaxAge(0);
 
     if (!$nids) {
       $res = new CacheableJsonResponse([]);
@@ -344,14 +373,18 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
    * GET /api/world/gates?z=&xmin=&xmax=&ymin=&ymax=
    */
   public function gates(Request $request): JsonResponse {
+    if ($denied = $this->requireBetaAccess()) {
+      return $denied;
+    }
+
     $z = $this->intOptionalParam($request, 'z', 10);
     $xmin = $this->intParam($request, 'xmin');
     $xmax = $this->intParam($request, 'xmax');
     $ymin = $this->intParam($request, 'ymin');
     $ymax = $this->intParam($request, 'ymax');
-  
+
     $storage = $this->entityTypeManager->getStorage('node');
-  
+
     $nids = $storage->getQuery()
     ->accessCheck(TRUE)
     ->condition('type', 'biome_gate')
@@ -360,46 +393,46 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     ->condition('field_x', $xmax, '<=')
     ->condition('field_y', $ymax, '<=')
     ->execute();
-  
+
     $cache = new CacheableMetadata();
     $cache->setCacheContexts(['url.query_args']);
-    
+
     // Important for newly-created biome_gate nodes.
     // Without this, an old viewport response can stay cached and miss a new gate.
     $cache->addCacheTags(['node_list:biome_gate']);
-    
+
     // During active layout work, disable endpoint caching.
     // Later we can relax this to a short max-age if needed.
     $cache->setCacheMaxAge(0);
-  
+
     $out = [];
-  
+
     if ($nids) {
       $nodes = $storage->loadMultiple($nids);
-  
+
       foreach ($nodes as $node) {
         $cache->addCacheableDependency($node);
-  
+
         $x = (int) ($node->get('field_x')->value ?? 0);
         $y = (int) ($node->get('field_y')->value ?? 0);
         $w = max(1, (int) ($node->get('field_w')->value ?: 2));
         $h = max(1, (int) ($node->get('field_h')->value ?: 2));
-  
+
         $x2 = $x + $w - 1;
         $y2 = $y + $h - 1;
-  
+
         // viewport intersection
         if ($x > $xmax || $x2 < $xmin || $y > $ymax || $y2 < $ymin) {
           continue;
         }
-  
+
         $src = null;
-  
+
         if ($node->hasField('field_gate_image') && !$node->get('field_gate_image')->isEmpty()) {
           $media = $node->get('field_gate_image')->entity;
           if ($media) {
             $cache->addCacheableDependency($media);
-  
+
             if ($media->hasField('field_media_image') && !$media->get('field_media_image')->isEmpty()) {
               $file = $media->get('field_media_image')->entity;
               if ($file) {
@@ -409,7 +442,7 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
             }
           }
         }
-  
+
         $out[] = [
           'x' => $x,
           'y' => $y,
@@ -421,24 +454,28 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
         ];
       }
     }
-  
+
     $res = new CacheableJsonResponse($out);
     $res->addCacheableDependency($cache);
     return $res;
   }
-  
+
   /**
    * GET /api/world/resolve-gate?key=
    */
   public function resolveGate(Request $request): JsonResponse {
+    if ($denied = $this->requireBetaAccess()) {
+      return $denied;
+    }
+
     $key = trim((string) $request->query->get('key', ''));
-  
+
     if ($key === '') {
       return new JsonResponse(['found' => false], 200);
     }
-  
+
     $storage = $this->entityTypeManager->getStorage('node');
-  
+
     $nids = $storage->getQuery()
       ->accessCheck(TRUE)
       ->condition('type', 'biome_gate')
@@ -446,17 +483,17 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       ->condition('field_biome_key', $key)
       ->range(0, 1)
       ->execute();
-  
+
     if (!$nids) {
       return new JsonResponse(['found' => false], 200);
     }
-  
+
     $node = $storage->load(reset($nids));
-  
+
     $x = (int) ($node->get('field_x')->value ?? 0);
     $y = (int) ($node->get('field_y')->value ?? 0);
     $z = (int) ($node->get('field_z')->value ?? 10);
-  
+
     return new JsonResponse([
       'found' => true,
       'anchor' => [
@@ -472,6 +509,10 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
    * GET /api/world/resolve?bundle=&slug=
    */
   public function resolve(Request $request): JsonResponse {
+    if ($denied = $this->requireBetaAccess()) {
+      return $denied;
+    }
+
     $bundle = trim((string) $request->query->get('bundle', ''));
     $slug = trim((string) $request->query->get('slug', ''));
     $z = $this->intOptionalParam($request, 'z', 10);
@@ -557,120 +598,229 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     return $res;
   }
 
-  public function subscribe(Request $request) {
-    $data = json_decode($request->getContent(), TRUE);
 
-    if (empty($data['email'])) {
-      return new JsonResponse(['error' => 'Email required'], 400);
+  public function newsletter(Request $request): JsonResponse {
+    if ($deny = $this->requireBetaAccess()) {
+      return $deny;
     }
 
-    if (!empty($data['company'])) {
-      return new JsonResponse(['error' => 'Spam detected'], 400);
+    $key = trim((string) $request->query->get('key', 'earworm'));
+    $date = trim((string) $request->query->get('date', ''));
+
+    if ($key === '') {
+      return new JsonResponse(['found' => false, 'error' => 'missing_key'], 200);
     }
 
-    $email = strtolower(trim($data['email']));
-    $name = trim((string) ($data['name'] ?? ''));
+    $storage = $this->entityTypeManager->getStorage('node');
 
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-      return new JsonResponse(['error' => 'Invalid email'], 400);
-    }
-    
-    $mailerlite = $this->settings->get('mailerlite', []);
-    $apiKey = is_array($mailerlite) ? (string) ($mailerlite['api_key'] ?? '') : '';
-    
-    if (!$apiKey) {
-      return new JsonResponse(['error' => 'MAILERLITE_API_KEY missing'], 500);
+    $edition_query = $storage->getQuery()
+      ->accessCheck(TRUE)
+      ->condition('type', 'newsletter_edition')
+      ->condition('status', 1)
+      ->condition('field_newsletter_key', $key);
+
+    if ($date !== '') {
+      $edition_query->condition('field_newsletter_date', $date);
     }
 
-    $payload = [
-      'email' => $email,
-      'fields' => [
-        'name' => $name,
-      ],
-      'status' => 'unconfirmed',
-    ];
+    $edition_nids = $edition_query
+      ->sort('field_newsletter_date', 'DESC')
+      ->sort('nid', 'DESC')
+      ->range(0, 1)
+      ->execute();
 
-    $ch = curl_init('https://connect.mailerlite.com/api/subscribers');
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
-    curl_setopt($ch, CURLOPT_POST, TRUE);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-      "Authorization: Bearer {$apiKey}",
-      'Content-Type: application/json',
-      'Accept: application/json',
-    ]);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+    if (!$edition_nids) {
+      return new JsonResponse(['found' => false, 'key' => $key, 'date' => $date ?: null], 200);
+    }
 
-    $result = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlError = curl_error($ch);
-    curl_close($ch);
+    $edition_nid = (int) reset($edition_nids);
 
-    $response = json_decode($result, TRUE);
+    $tile_nids = $storage->getQuery()
+      ->accessCheck(TRUE)
+      ->condition('type', 'tile')
+      ->condition('status', 1)
+      ->condition('field_role', 'anchor')
+      ->condition('field_object_reference', $edition_nid)
+      ->sort('nid', 'DESC')
+      ->range(0, 10)
+      ->execute();
 
-    if ($curlError) {
+    if (!$tile_nids) {
       return new JsonResponse([
-        'error' => 'MailerLite CURL error',
-        'details' => $curlError,
-      ], 502);
+        'found' => false,
+        'key' => $key,
+        'date' => $date ?: null,
+        'edition_nid' => $edition_nid,
+      ], 200);
     }
 
-    if ($httpCode < 200 || $httpCode >= 300) {
-      return new JsonResponse([
-        'error' => 'MailerLite API error',
-        'http_code' => $httpCode,
-        'response' => $response,
-        'raw' => $result,
-      ], 502);
-    }
+    $tiles = $storage->loadMultiple($tile_nids);
+    $tile = null;
 
-    $subscriberId = $response['data']['id'] ?? NULL;
-    if (!$subscriberId) {
-      return new JsonResponse([
-        'error' => 'MailerLite returned no subscriber id',
-        'response' => $response,
-        'raw' => $result,
-      ], 502);
-    }
-
-    // Only after MailerLite succeeds do we create/update Drupal user.
-    $storage = \Drupal::entityTypeManager()->getStorage('user');
-    $users = $storage->loadByProperties(['mail' => $email]);
-    $user = $users ? reset($users) : NULL;
-
-    if (!$user) {
-      $base = preg_replace('/[^a-z0-9_]+/i', '_', explode('@', $email)[0]);
-      $base = trim($base ?: 'user', '_');
-      $username = $base;
-      $i = 1;
-
-      while ($storage->loadByProperties(['name' => $username])) {
-        $username = $base . '_' . $i;
-        $i++;
+    // Prefer the live/newsletter display tile when present.
+    foreach ($tiles as $candidate) {
+      if (
+        $candidate->hasField('field_tile_display_mode') &&
+        !$candidate->get('field_tile_display_mode')->isEmpty() &&
+        (string) $candidate->get('field_tile_display_mode')->value === 'newsletter'
+      ) {
+        $tile = $candidate;
+        break;
       }
-
-      $user = User::create([
-        'name' => $username,
-        'mail' => $email,
-        'status' => 1,
-      ]);
     }
 
-    $user->set('field_newsletter_status', 'subscribed');
-    $user->set('field_mailerlite_id', $subscriberId);
-    $user->save();
+    if (!$tile) {
+      $tile = reset($tiles);
+    }
+
+    $x = (int) $tile->get('field_x')->value;
+    $y = (int) $tile->get('field_y')->value;
+    $z = $tile->hasField('field_z') && !$tile->get('field_z')->isEmpty()
+      ? (int) $tile->get('field_z')->value
+      : 10;
+
+    $w = $tile->hasField('field_w') && !$tile->get('field_w')->isEmpty()
+      ? max(1, (int) $tile->get('field_w')->value)
+      : 1;
+
+    $h = $tile->hasField('field_h') && !$tile->get('field_h')->isEmpty()
+      ? max(1, (int) $tile->get('field_h')->value)
+      : 1;
 
     return new JsonResponse([
-      'success' => TRUE,
-      'mailerlite_id' => $subscriberId,
+      'found' => true,
+      'key' => $key,
+      'date' => $date ?: null,
+      'edition_nid' => $edition_nid,
+      'anchor' => [
+        'x' => $x,
+        'y' => $y,
+        'w' => $w,
+        'h' => $h,
+        'url' => "/w/{$z}/{$x}/{$y}",
+      ],
+    ], 200);
+  }
+
+  private function requireBetaAccess(): ?JsonResponse {
+    $account = \Drupal::currentUser();
+
+    if ($account->isAnonymous()) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'login_required',
+        'message' => 'Sign in to access the EWRM beta.',
+      ], 401);
+    }
+
+    $allowed = array_intersect($account->getRoles(), [
+      'administrator',
+      'beta_tester',
     ]);
+
+    if (empty($allowed)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'beta_access_required',
+        'message' => 'Beta access is required.',
+      ], 403);
+    }
+
+    return null;
   }
 
   // ----------------------------
   // Object builders (Preview/Full)
   // ----------------------------
 
+
+  /**
+   * newsletter_edition is a wrapper. Its display/media data comes from
+   * field_object_reference, usually a song.
+   */
+  private function displayNodeForObject($node, CacheableMetadata $cache) {
+    if (!$node) return $node;
+
+    if (
+      (string) $node->bundle() === 'newsletter_edition' &&
+      $node->hasField('field_object_reference') &&
+      !$node->get('field_object_reference')->isEmpty()
+    ) {
+      $display = $node->get('field_object_reference')->entity;
+      if ($display) {
+        $cache->addCacheableDependency($display);
+        return $display;
+      }
+    }
+
+    return $node;
+  }
+
+  private function buildObjectCoverUrl($node, CacheableMetadata $cache): ?string {
+    if (!$node) return null;
+
+    foreach (['field_cover_override', 'field_cover'] as $field_name) {
+      if (!$node->hasField($field_name) || $node->get($field_name)->isEmpty()) {
+        continue;
+      }
+
+      $media = $node->get($field_name)->entity;
+      if (!$media) continue;
+      $cache->addCacheableDependency($media);
+
+      if (!$media->hasField('field_media_image') || $media->get('field_media_image')->isEmpty()) {
+        continue;
+      }
+
+      $file = $media->get('field_media_image')->entity;
+      if (!$file) continue;
+      $cache->addCacheableDependency($file);
+
+      return $this->fileUrlGenerator->generateAbsoluteString($file->getFileUri());
+    }
+
+    return null;
+  }
+
+  private function buildEmbedCoverUrl(?string $url): ?string {
+    if (!$url || !is_string($url)) return null;
+
+    $parts = @parse_url($url);
+    if (!is_array($parts) || empty($parts['host'])) return null;
+
+    $host = strtolower((string) $parts['host']);
+    $path = (string) ($parts['path'] ?? '');
+
+    $query = [];
+    if (!empty($parts['query'])) {
+      parse_str((string) $parts['query'], $query);
+    }
+
+    $video_id = null;
+
+    if (str_contains($host, 'youtube.com')) {
+      if (!empty($query['v']) && is_string($query['v'])) {
+        $video_id = $query['v'];
+      }
+      elseif (preg_match('#/(embed|shorts)/([^/?#]+)#', $path, $m)) {
+        $video_id = $m[2];
+      }
+    }
+    elseif ($host === 'youtu.be' || str_ends_with($host, '.youtu.be')) {
+      $video_id = trim($path, '/');
+    }
+
+    if (!$video_id || !preg_match('/^[A-Za-z0-9_-]{6,}$/', $video_id)) {
+      return null;
+    }
+
+    return 'https://i.ytimg.com/vi/' . rawurlencode($video_id) . '/hqdefault.jpg';
+  }
+
   private function buildObjectPreview($node, CacheableMetadata $cache): array {
     $cache->addCacheableDependency($node);
+
+    $display_node = $this->displayNodeForObject($node, $cache);
 
     $base = [
       'id' => (int) $node->id(),
@@ -678,33 +828,74 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       'slug' => $this->slugForNode((int) $node->id()),
       'title' => (string) $node->label(),
       'path' => $this->aliasManager->getAliasByPath('/node/' . $node->id()),
-      'cover' => $this->buildEntityCoverUrl($node, $cache),
+      'cover' => $this->buildEntityCoverUrl($display_node, $cache),
     ];
 
-    $embed = $this->readFirstLinkUrl($node, ['field_embed_url', 'field_media_url']);
+    $embed = $this->readFirstLinkUrl($display_node, ['field_embed_url', 'field_media_url']);
     $base['embed_url'] = $embed ?: null;
-    $base['embed_start'] = $this->readInt($node, ['field_embed_start'], 0);
+    $base['embed_start'] = $this->readInt($display_node, ['field_embed_start'], 0);
+
+    if ($display_node && (int) $display_node->id() !== (int) $node->id()) {
+      $display_preview = [
+        'id' => (int) $display_node->id(),
+        'bundle' => (string) $display_node->bundle(),
+        'slug' => $this->slugForNode((int) $display_node->id()),
+        'title' => (string) $display_node->label(),
+        'path' => $this->aliasManager->getAliasByPath('/node/' . $display_node->id()),
+        'cover' => $this->buildEntityCoverUrl($display_node, $cache),
+        'embed_url' => $embed ?: null,
+        'embed_start' => $this->readInt($display_node, ['field_embed_start'], 0),
+      ];
+
+      $base['display_object'] = $display_preview;
+
+      if ((string) $display_node->bundle() === 'song') {
+        $base['referenced_song'] = $display_preview;
+      }
+    }
 
     return $base;
   }
 
+
+
   private function buildObjectFull($node, CacheableMetadata $cache): array {
     $cache->addCacheableDependency($node);
 
+    $display_node = $this->displayNodeForObject($node, $cache);
+
     $payload = $this->buildObjectPreview($node, $cache);
 
-    // Description (prefer field_description, fallback to body).
-    $payload['description'] = $this->readDescription($node);
+    $payload['description'] = $this->readDescription($display_node);
+    $payload['embed_url'] = $this->readFirstLinkUrl($display_node, ['field_embed_url', 'field_media_url']) ?: null;
+    $payload['embed_start'] = $this->readInt($display_node, ['field_embed_start'], 0);
+    $payload['links'] = $this->readLinks($display_node, ['field_links']);
 
-    // Embed URL + Start
-    $payload['embed_url'] = $this->readFirstLinkUrl($node, ['field_embed_url', 'field_media_url']) ?: null;
-    $payload['embed_start'] = $this->readInt($node, ['field_embed_start'], 0);
+    if ($display_node && (int) $display_node->id() !== (int) $node->id()) {
+      $display_full = [
+        'id' => (int) $display_node->id(),
+        'bundle' => (string) $display_node->bundle(),
+        'slug' => $this->slugForNode((int) $display_node->id()),
+        'title' => (string) $display_node->label(),
+        'path' => $this->aliasManager->getAliasByPath('/node/' . $display_node->id()),
+        'cover' => $this->buildEntityCoverUrl($display_node, $cache),
+        'embed_url' => $this->readFirstLinkUrl($display_node, ['field_embed_url', 'field_media_url']) ?: null,
+        'embed_start' => $this->readInt($display_node, ['field_embed_start'], 0),
+        'description' => $this->readDescription($display_node),
+        'links' => $this->readLinks($display_node, ['field_links']),
+      ];
 
-    // Links (multi-value)
-    $payload['links'] = $this->readLinks($node, ['field_links']);
+      $payload['display_object'] = $display_full;
+
+      if ((string) $display_node->bundle() === 'song') {
+        $payload['referenced_song'] = $display_full;
+      }
+    }
 
     return $payload;
   }
+
+
 
   // ----------------------------
   // Tile helpers
@@ -731,32 +922,40 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
   }
 
   private function buildTileCoverUrl($tile, CacheableMetadata $cache): ?string {
-    // 1) Tile-level override first.
-    if ($tile->hasField('field_cover_override') && !$tile->get('field_cover_override')->isEmpty()) {
-      $media = $tile->get('field_cover_override')->entity;
-      if ($media) {
-        $cache->addCacheableDependency($media);
+    if (!$tile) return null;
 
-        if ($media->hasField('field_media_image') && !$media->get('field_media_image')->isEmpty()) {
-          $file = $media->get('field_media_image')->entity;
-          if ($file) {
-            $cache->addCacheableDependency($file);
-            return $this->fileUrlGenerator->generateAbsoluteString($file->getFileUri());
-          }
-        }
+    foreach (['field_cover_override', 'field_cover'] as $field_name) {
+      if (!$tile->hasField($field_name) || $tile->get($field_name)->isEmpty()) {
+        continue;
       }
+
+      $media = $tile->get($field_name)->entity;
+      if (!$media) continue;
+      $cache->addCacheableDependency($media);
+
+      if (!$media->hasField('field_media_image') || $media->get('field_media_image')->isEmpty()) {
+        continue;
+      }
+
+      $file = $media->get('field_media_image')->entity;
+      if (!$file) continue;
+      $cache->addCacheableDependency($file);
+
+      return $this->fileUrlGenerator->generateAbsoluteString($file->getFileUri());
     }
 
-    // 2) Fallback to the referenced object's permanent cover.
     if ($tile->hasField('field_object_reference') && !$tile->get('field_object_reference')->isEmpty()) {
       $object = $tile->get('field_object_reference')->entity;
       if ($object) {
-        return $this->buildEntityCoverUrl($object, $cache);
+        $cache->addCacheableDependency($object);
+        $display_object = $this->displayNodeForObject($object, $cache);
+        return $this->buildEntityCoverUrl($display_object, $cache);
       }
     }
 
     return null;
   }
+
 
   // ----------------------------
   // Field readers
@@ -803,25 +1002,246 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     return $default;
   }
 
-  private function readLinks($node, array $fieldNames): array {
+  private function readLinks($node, array $fieldNames, ?CacheableMetadata $cache = null): array {
     foreach ($fieldNames as $field) {
       if (!$node->hasField($field) || $node->get($field)->isEmpty()) continue;
 
       $out = [];
+
       foreach ($node->get($field) as $item) {
         $uri = (string) ($item?->uri ?? '');
         $url = $this->normalizeLinkUri($uri);
         if ($url === '') continue;
 
-        $label = (string) ($item?->title ?? '');
-        $out[] = [
-          'label' => trim($label),
+        $label = trim((string) ($item?->title ?? ''));
+
+        $link = [
+          'label' => $label,
           'url' => $url,
         ];
+
+        $target = $this->resolveMenuLinkTarget($uri, $url, $cache);
+        if ($target) {
+          $link = array_merge($link, $target);
+          $link['label'] = $label !== '' ? $label : (string) ($target['title'] ?? $link['label']);
+        }
+
+        $out[] = $link;
       }
+
       return $out;
     }
+
     return [];
+  }
+
+  private function resolveMenuLinkTarget(string $uri, string $normalizedUrl, ?CacheableMetadata $cache = null): ?array {
+    $path = $this->menuLinkPath($uri, $normalizedUrl);
+    if ($path === '') return null;
+
+    $node = null;
+
+    if (preg_match('#^/node/(\d+)$#', $path, $m)) {
+      $node = $this->entityTypeManager->getStorage('node')->load((int) $m[1]);
+    }
+    elseif (preg_match('#^/world/w/(\d+)/(\d+)/(\d+)$#', $path, $m) || preg_match('#^/w/(\d+)/(\d+)/(\d+)$#', $path, $m)) {
+      $node = $this->loadTileByCoords((int) $m[1], (int) $m[2], (int) $m[3]);
+    }
+    else {
+      $candidatePaths = [$path];
+
+      if (str_starts_with($path, '/world/')) {
+        $candidatePaths[] = substr($path, strlen('/world')) ?: '/';
+      }
+      else {
+        $candidatePaths[] = '/world' . $path;
+      }
+
+      foreach (array_unique($candidatePaths) as $candidatePath) {
+        $internal = $this->aliasManager->getPathByAlias($candidatePath);
+        if (is_string($internal) && preg_match('#^/node/(\d+)$#', $internal, $m)) {
+          $node = $this->entityTypeManager->getStorage('node')->load((int) $m[1]);
+          if ($node) break;
+        }
+      }
+    }
+
+    if (!$node || !$node->isPublished()) return null;
+
+    if ($cache) {
+      $cache->addCacheableDependency($node);
+    }
+
+    if ($node->bundle() === 'tile') {
+      return $this->buildMenuLinkTargetFromTile($node, $cache);
+    }
+
+    return $this->buildMenuLinkTargetFromObject($node, $cache, null);
+  }
+
+  private function menuLinkPath(string $uri, string $normalizedUrl): string {
+    $raw = trim($uri);
+
+    if (str_starts_with($raw, 'entity:node/')) {
+      $nid = (int) substr($raw, strlen('entity:node/'));
+      return $nid > 0 ? "/node/{$nid}" : '';
+    }
+
+    if (str_starts_with($raw, 'internal:')) {
+      $raw = substr($raw, strlen('internal:'));
+    }
+    else {
+      $raw = trim($normalizedUrl) !== '' ? trim($normalizedUrl) : $raw;
+    }
+
+    if ($raw === '') return '';
+
+    if (preg_match('#^https?://#i', $raw)) {
+      $parts = @parse_url($raw);
+      if (!is_array($parts) || empty($parts['path'])) return '';
+      $path = (string) $parts['path'];
+    }
+    else {
+      $path = $raw;
+    }
+
+    if ($path === '') return '';
+    if ($path[0] !== '/') $path = '/' . $path;
+
+    return $path;
+  }
+
+  private function loadTileByCoords(int $z, int $x, int $y) {
+    $nids = $this->entityTypeManager->getStorage('node')->getQuery()
+      ->accessCheck(TRUE)
+      ->condition('type', 'tile')
+      ->condition('status', 1)
+      ->condition('field_z', $z)
+      ->condition('field_x', $x)
+      ->condition('field_y', $y)
+      ->range(0, 1)
+      ->execute();
+
+    if (!$nids) return null;
+
+    return $this->entityTypeManager->getStorage('node')->load(reset($nids));
+  }
+
+  private function buildMenuLinkTargetFromTile($tile, ?CacheableMetadata $cache = null): array {
+    if ($cache) {
+      $cache->addCacheableDependency($tile);
+    }
+
+    $z = (int) ($tile->get('field_z')->value ?? 10);
+    $x = (int) ($tile->get('field_x')->value ?? 0);
+    $y = (int) ($tile->get('field_y')->value ?? 0);
+    $w = max(1, (int) ($tile->get('field_w')->value ?: 1));
+    $h = max(1, (int) ($tile->get('field_h')->value ?: 1));
+
+    $tileUrl = "/w/{$z}/{$x}/{$y}";
+
+    $target = [
+      'tile_id' => (int) $tile->id(),
+      'tile_url' => $tileUrl,
+      'url' => $tileUrl,
+      'w' => $w,
+      'h' => $h,
+    ];
+
+    $object = null;
+    if ($tile->hasField('field_object_reference') && !$tile->get('field_object_reference')->isEmpty()) {
+      $object = $tile->get('field_object_reference')->entity;
+    }
+
+    if ($object && $object->isPublished()) {
+      if ($cache) {
+        $cache->addCacheableDependency($object);
+      }
+
+      return array_merge(
+        $target,
+        $this->buildMenuLinkTargetFromObject($object, $cache, $tileUrl)
+      );
+    }
+
+    $target['entity_id'] = (int) $tile->id();
+    $target['bundle'] = (string) $tile->bundle();
+    $target['title'] = (string) $tile->label();
+    $target['path'] = $tileUrl;
+    $target['cover'] = $cache ? $this->buildTileCoverUrl($tile, $cache) : null;
+    $target['embed_url'] = null;
+    $target['embed_start'] = 0;
+
+    return $target;
+  }
+
+  private function buildMenuLinkTargetFromObject($object, ?CacheableMetadata $cache = null, ?string $overrideUrl = null): array {
+    if ($cache) {
+      $cache->addCacheableDependency($object);
+    }
+
+    $path = $this->aliasManager->getAliasByPath('/node/' . $object->id());
+    $embed = $this->readFirstLinkUrl($object, ['field_embed_url', 'field_media_url']);
+    $embedThumbnail = $embed ? $this->thumbnailFromEmbedUrl($embed) : null;
+    $cover = $cache ? $this->buildEntityCoverUrl($object, $cache) : null;
+
+    return [
+      'entity_id' => (int) $object->id(),
+      'bundle' => (string) $object->bundle(),
+      'title' => trim((string) $object->label()),
+      'path' => $path,
+      'url' => $overrideUrl ?: $path,
+      'cover' => $cover ?: $embedThumbnail,
+      'thumbnail' => $embedThumbnail,
+      'embed_url' => $embed ?: null,
+      'embed_start' => $this->readInt($object, ['field_embed_start'], 0),
+    ];
+  }
+
+  private function thumbnailFromEmbedUrl(string $url): ?string {
+    $url = trim($url);
+    if ($url === '') return null;
+
+    $parts = @parse_url($url);
+    if (!is_array($parts) || empty($parts['host'])) return null;
+
+    $host = strtolower((string) $parts['host']);
+    $path = (string) ($parts['path'] ?? '');
+    $query = (string) ($parts['query'] ?? '');
+
+    // YouTube watch URL:
+    // https://www.youtube.com/watch?v=CMyNMITOjro
+    if (str_contains($host, 'youtube.com')) {
+      parse_str($query, $q);
+      $id = isset($q['v']) ? trim((string) $q['v']) : '';
+
+      // YouTube Shorts:
+      // https://www.youtube.com/shorts/VIDEO_ID
+      if ($id === '' && preg_match('#^/shorts/([^/?#]+)#', $path, $m)) {
+        $id = trim((string) $m[1]);
+      }
+
+      // YouTube embed:
+      // https://www.youtube.com/embed/VIDEO_ID
+      if ($id === '' && preg_match('#^/embed/([^/?#]+)#', $path, $m)) {
+        $id = trim((string) $m[1]);
+      }
+
+      if ($id !== '' && preg_match('/^[A-Za-z0-9_-]{6,}$/', $id)) {
+        return "https://img.youtube.com/vi/{$id}/hqdefault.jpg";
+      }
+    }
+
+    // Short YouTube URL:
+    // https://youtu.be/CMyNMITOjro
+    if ($host === 'youtu.be' || str_ends_with($host, '.youtu.be')) {
+      $id = trim($path, '/');
+      if ($id !== '' && preg_match('/^[A-Za-z0-9_-]{6,}$/', $id)) {
+        return "https://img.youtube.com/vi/{$id}/hqdefault.jpg";
+      }
+    }
+
+    return null;
   }
 
   /**
