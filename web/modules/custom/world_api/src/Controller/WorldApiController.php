@@ -1040,6 +1040,14 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
         'default_w' => 1,
         'default_h' => 4,
       ],
+      'road' => [
+        'object_bundle' => '',
+        'search_bundles' => [],
+        'display_modes' => ['none'],
+        'requires_object' => FALSE,
+        'default_w' => 1,
+        'default_h' => 1,
+      ],
     ];
 
     $builder_type = trim((string) ($payload['builder_type'] ?? ''));
@@ -1074,7 +1082,7 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       ], 400);
     }
 
-    $allowed_roles = ['anchor', 'occupied', 'plaza', 'empty'];
+    $allowed_roles = ['anchor', 'occupied', 'plaza', 'empty', 'road'];
     $role = trim((string) ($payload['role'] ?? 'anchor'));
     if (!in_array($role, $allowed_roles, TRUE)) {
       return new JsonResponse([
@@ -1082,6 +1090,18 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
         'error' => 'invalid_role',
         'allowed_roles' => $allowed_roles,
       ], 400);
+    }
+
+    if ($builder_type === 'road') {
+      $role = 'road';
+      $w = 1;
+      $h = 1;
+      $payload['tile_display_mode'] = 'none';
+      $payload['flippable'] = 0;
+      $payload['ddt'] = 1;
+      $payload['is_canonical'] = 0;
+      $payload['target_id'] = 0;
+      $payload['object_ref'] = '';
     }
 
     $display_mode = trim((string) ($payload['tile_display_mode'] ?? $profile['display_modes'][0]));
