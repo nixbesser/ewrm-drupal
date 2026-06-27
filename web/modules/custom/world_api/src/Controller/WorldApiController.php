@@ -770,13 +770,28 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       ], 404);
     }
 
+    $role = $tile->hasField('field_role')
+      ? (string) ($tile->get('field_role')->value ?? '')
+      : '';
+
     $deleted = [
       'id' => (int) $tile->id(),
       'title' => $tile->label(),
       'z' => $z,
       'x' => $x,
       'y' => $y,
+      'role' => $role,
     ];
+
+    $changed_tiles = in_array($role, ['road', 'ybr', 'plaza'], TRUE)
+      ? [[
+        'z' => $z,
+        'x' => $x,
+        'y' => $y,
+        'role' => $role,
+        'action' => 'deleted',
+      ]]
+      : [];
 
     $tile->delete();
 
@@ -784,6 +799,8 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       'ok' => true,
       'action' => 'deleted',
       'tile' => $deleted,
+      'changed_tiles' => $changed_tiles,
+      'plate_rebuild_required' => !empty($changed_tiles),
     ], 200);
   }
 
@@ -1209,6 +1226,16 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
 
     $tile->save();
 
+    $changed_tiles = in_array($role, ['road', 'ybr', 'plaza'], TRUE)
+      ? [[
+        'z' => $z,
+        'x' => $x,
+        'y' => $y,
+        'role' => $role,
+        'action' => $action,
+      ]]
+      : [];
+
     return new JsonResponse([
       'ok' => true,
       'action' => $action,
@@ -1226,6 +1253,8 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
         'tile_display_mode' => $display_mode,
         'url' => "/w/{$z}/{$x}/{$y}",
       ],
+      'changed_tiles' => $changed_tiles,
+      'plate_rebuild_required' => !empty($changed_tiles),
     ], 200);
   }
 
