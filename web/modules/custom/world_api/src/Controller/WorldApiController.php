@@ -702,6 +702,258 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     ], 200);
   }
 
+  public function saveTilePlacement(Request $request): JsonResponse {
+    if ($request->getMethod() === 'OPTIONS') {
+      return new JsonResponse(['ok' => true], 200);
+    }
+
+    if ($deny = $this->requireBetaAccess()) {
+      return $deny;
+    }
+
+    $account = \Drupal::currentUser();
+    if (!in_array('administrator', $account->getRoles(), TRUE)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'builder_access_required',
+        'message' => 'Administrator access is required to place world tiles.',
+      ], 403);
+    }
+
+    $payload = json_decode($request->getContent(), TRUE);
+    if (!is_array($payload)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'invalid_json',
+      ], 400);
+    }
+
+    $profiles = [
+      'song' => [
+        'object_bundle' => 'song',
+        'search_bundles' => ['song'],
+        'display_modes' => ['song'],
+        'requires_object' => TRUE,
+        'default_w' => 1,
+        'default_h' => 1,
+      ],
+      'newsletter' => [
+        'object_bundle' => 'newsletter_edition',
+        'search_bundles' => ['newsletter_edition'],
+        'display_modes' => ['newsletter'],
+        'requires_object' => TRUE,
+        'default_w' => 2,
+        'default_h' => 2,
+      ],
+      'artist' => [
+        'object_bundle' => 'artist',
+        'search_bundles' => ['artist'],
+        'display_modes' => ['media_tile'],
+        'requires_object' => TRUE,
+        'default_w' => 1,
+        'default_h' => 1,
+      ],
+      'place' => [
+        'object_bundle' => 'place',
+        'search_bundles' => ['place'],
+        'display_modes' => ['media_tile'],
+        'requires_object' => TRUE,
+        'default_w' => 1,
+        'default_h' => 1,
+      ],
+      'custom_tile' => [
+        'object_bundle' => 'custom_tile',
+        'search_bundles' => ['custom_tile'],
+        'display_modes' => ['media_tile'],
+        'requires_object' => TRUE,
+        'default_w' => 2,
+        'default_h' => 2,
+      ],
+      'chat' => [
+        'object_bundle' => 'custom_tile',
+        'search_bundles' => ['custom_tile'],
+        'display_modes' => ['chat'],
+        'requires_object' => FALSE,
+        'default_w' => 2,
+        'default_h' => 2,
+      ],
+      'biome_gate' => [
+        'object_bundle' => 'biome_gate',
+        'search_bundles' => ['biome_gate'],
+        'display_modes' => ['gate'],
+        'requires_object' => TRUE,
+        'default_w' => 1,
+        'default_h' => 4,
+      ],
+    ];
+
+    $builder_type = trim((string) ($payload['builder_type'] ?? ''));
+    if ($builder_type === '' || !isset($profiles[$builder_type])) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'invalid_builder_type',
+        'allowed_builder_types' => array_keys($profiles),
+      ], 400);
+    }
+
+    $profile = $profiles[$builder_type];
+
+    $z = (int) ($payload['z'] ?? 10);
+    $x = (int) ($payload['x'] ?? -1);
+    $y = (int) ($payload['y'] ?? -1);
+    $w = max(1, min(64, (int) ($payload['w'] ?? $profile['default_w'])));
+    $h = max(1, min(64, (int) ($payload['h'] ?? $profile['default_h'])));
+
+    if ($z < 0 || $x < 0 || $y < 0 || $x > 1023 || $y > 1023) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'invalid_coordinates',
+        'message' => 'Expected z >= 0 and x/y between 0 and 1023.',
+      ], 400);
+    }
+
+    if (($x + $w - 1) > 1023 || ($y + $h - 1) > 1023) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'tile_out_of_bounds',
+      ], 400);
+    }
+
+    $allowed_roles = ['anchor', 'occupied', 'plaza', 'empty'];
+    $role = trim((string) ($payload['role'] ?? 'anchor'));
+    if (!in_array($role, $allowed_roles, TRUE)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'invalid_role',
+        'allowed_roles' => $allowed_roles,
+      ], 400);
+    }
+
+    $display_mode = trim((string) ($payload['tile_display_mode'] ?? $profile['display_modes'][0]));
+    if (!in_array($display_mode, $profile['display_modes'], TRUE)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'invalid_display_mode',
+        'allowed_display_modes' => $profile['display_modes'],
+      ], 400);
+    }
+
+    $target_id = (int) ($payload['target_id'] ?? 0);
+    if (!$target_id && !empty($payload['object_ref']) && preg_match('/node:(\d+)/', (string) $payload['object_ref'], $m)) {
+      $target_id = (int) $m[1];
+    }
+
+    if ($profile['requires_object'] && !$target_id) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'missing_target_id',
+        'message' => 'This builder type requires a referenced object.',
+      ], 400);
+    }
+
+    $storage = $this->entityTypeManager->getStorage('node');
+
+    $target_node = null;
+    if ($target_id) {
+      $target_node = $storage->load($target_id);
+      if (!$target_node || $target_node->bundle() === 'tile') {
+        return new JsonResponse([
+          'ok' => false,
+          'error' => 'invalid_target',
+          'message' => 'Referenced object was not found.',
+        ], 400);
+      }
+
+      if (!in_array($target_node->bundle(), $profile['search_bundles'], TRUE)) {
+        return new JsonResponse([
+          'ok' => false,
+          'error' => 'target_bundle_mismatch',
+          'expected_bundles' => $profile['search_bundles'],
+          'actual_bundle' => $target_node->bundle(),
+        ], 400);
+      }
+    }
+
+    $tile_key = trim((string) ($payload['tile_key'] ?? "{$z}:{$x}:{$y}"));
+    if ($tile_key === '') {
+      $tile_key = "{$z}:{$x}:{$y}";
+    }
+
+    $title = trim((string) ($payload['title'] ?? ''));
+    if ($title === '') {
+      $target_label = $target_node ? $target_node->label() : $builder_type;
+      $title = "{$builder_type} {$target_label} @ {$z}:{$x}:{$y}";
+    }
+
+    $existing = $storage->getQuery()
+      ->accessCheck(TRUE)
+      ->condition('type', 'tile')
+      ->condition('field_z', $z)
+      ->condition('field_x', $x)
+      ->condition('field_y', $y)
+      ->range(0, 1)
+      ->execute();
+
+    $action = 'created';
+    if ($existing) {
+      $tile = $storage->load(reset($existing));
+      $action = 'updated';
+    }
+    else {
+      $tile = $storage->create([
+        'type' => 'tile',
+        'status' => 1,
+      ]);
+    }
+
+    $tile->setTitle($title);
+
+    $field_values = [
+      'field_z' => $z,
+      'field_x' => $x,
+      'field_y' => $y,
+      'field_w' => $w,
+      'field_h' => $h,
+      'field_role' => $role,
+      'field_tile_key' => $tile_key,
+      'field_tile_display_mode' => $display_mode,
+      'field_flippable' => !empty($payload['flippable']) ? 1 : 0,
+      'field_ddt' => !empty($payload['ddt']) ? 1 : 0,
+      'field_is_canonical' => !empty($payload['is_canonical']) ? 1 : 0,
+    ];
+
+    foreach ($field_values as $field_name => $value) {
+      if ($tile->hasField($field_name)) {
+        $tile->set($field_name, $value);
+      }
+    }
+
+    if ($tile->hasField('field_object_reference')) {
+      $tile->set('field_object_reference', $target_id ? ['target_id' => $target_id] : []);
+    }
+
+    $tile->save();
+
+    return new JsonResponse([
+      'ok' => true,
+      'action' => $action,
+      'tile' => [
+        'id' => (int) $tile->id(),
+        'title' => $tile->label(),
+        'z' => $z,
+        'x' => $x,
+        'y' => $y,
+        'w' => $w,
+        'h' => $h,
+        'role' => $role,
+        'target_id' => $target_id ?: null,
+        'target_bundle' => $target_node ? $target_node->bundle() : null,
+        'tile_display_mode' => $display_mode,
+        'url' => "/w/{$z}/{$x}/{$y}",
+      ],
+    ], 200);
+  }
+
   public function objectSearch(Request $request): JsonResponse {
     if ($deny = $this->requireBetaAccess()) {
       return $deny;

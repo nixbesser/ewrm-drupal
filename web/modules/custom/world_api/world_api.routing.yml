@@ -64,3 +64,11 @@ world_api.object_search:
     _permission: 'access content'
   methods: [GET, OPTIONS]
 
+world_api.tile_placement:
+  path: '/api/world/tile-placement'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\WorldApiController::saveTilePlacement'
+  requirements:
+    _permission: 'access content'
+  methods: [POST, OPTIONS]
+
