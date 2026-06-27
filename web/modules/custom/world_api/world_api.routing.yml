@@ -80,3 +80,11 @@ world_api.tile_placement_delete:
     _permission: 'access content'
   methods: [POST, OPTIONS]
 
+world_api.tile_placement_load:
+  path: '/api/world/tile-placement/load'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\WorldApiController::loadTilePlacement'
+  requirements:
+    _permission: 'access content'
+  methods: [GET, OPTIONS]
+

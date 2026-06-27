@@ -787,6 +787,176 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     ], 200);
   }
 
+  public function loadTilePlacement(Request $request): JsonResponse {
+    if ($request->getMethod() === 'OPTIONS') {
+      return new JsonResponse(['ok' => true], 200);
+    }
+
+    if ($deny = $this->requireBetaAccess()) {
+      return $deny;
+    }
+
+    $account = \Drupal::currentUser();
+    if (!in_array('administrator', $account->getRoles(), TRUE)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'builder_access_required',
+        'message' => 'Administrator access is required to edit world tiles.',
+      ], 403);
+    }
+
+    $z = (int) $request->query->get('z', 10);
+    $x = (int) $request->query->get('x', -1);
+    $y = (int) $request->query->get('y', -1);
+
+    if ($z < 0 || $x < 0 || $y < 0 || $x > 1023 || $y > 1023) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'invalid_coordinates',
+        'message' => 'Expected z >= 0 and x/y between 0 and 1023.',
+      ], 400);
+    }
+
+    $storage = $this->entityTypeManager->getStorage('node');
+
+    $nids = $storage->getQuery()
+      ->accessCheck(TRUE)
+      ->condition('type', 'tile')
+      ->condition('field_z', $z)
+      ->condition('field_x', $x)
+      ->condition('field_y', $y)
+      ->range(0, 1)
+      ->execute();
+
+    if (!$nids) {
+      return new JsonResponse([
+        'ok' => true,
+        'found' => false,
+        'z' => $z,
+        'x' => $x,
+        'y' => $y,
+      ], 200);
+    }
+
+    $tile = $storage->load(reset($nids));
+    if (!$tile) {
+      return new JsonResponse([
+        'ok' => true,
+        'found' => false,
+        'z' => $z,
+        'x' => $x,
+        'y' => $y,
+      ], 200);
+    }
+
+    $role = $tile->hasField('field_role') ? (string) ($tile->get('field_role')->value ?? 'anchor') : 'anchor';
+
+    // If an occupied footprint tile is clicked, edit the anchor tile.
+    if ($role === 'occupied' && $tile->hasField('field_anchor_ref') && !$tile->get('field_anchor_ref')->isEmpty()) {
+      $anchor = $tile->get('field_anchor_ref')->entity;
+      if ($anchor) {
+        $tile = $anchor;
+        $role = $tile->hasField('field_role') ? (string) ($tile->get('field_role')->value ?? 'anchor') : 'anchor';
+      }
+    }
+
+    $tx = $tile->hasField('field_x') ? (int) ($tile->get('field_x')->value ?? $x) : $x;
+    $ty = $tile->hasField('field_y') ? (int) ($tile->get('field_y')->value ?? $y) : $y;
+    $tz = $tile->hasField('field_z') ? (int) ($tile->get('field_z')->value ?? $z) : $z;
+    $tw = $tile->hasField('field_w') ? max(1, (int) ($tile->get('field_w')->value ?: 1)) : 1;
+    $th = $tile->hasField('field_h') ? max(1, (int) ($tile->get('field_h')->value ?: 1)) : 1;
+
+    $display_mode = $tile->hasField('field_tile_display_mode')
+      ? (string) ($tile->get('field_tile_display_mode')->value ?? '')
+      : '';
+
+    $tile_key = $tile->hasField('field_tile_key')
+      ? (string) ($tile->get('field_tile_key')->value ?? "{$tz}:{$tx}:{$ty}")
+      : "{$tz}:{$tx}:{$ty}";
+
+    $flippable = $tile->hasField('field_flippable') ? (bool) $tile->get('field_flippable')->value : false;
+    $ddt = $tile->hasField('field_ddt') ? (bool) $tile->get('field_ddt')->value : false;
+    $canonical = $tile->hasField('field_is_canonical') ? (bool) $tile->get('field_is_canonical')->value : false;
+
+    $target_id = 0;
+    $object_bundle = '';
+    $object_title = '';
+    $object_path = '';
+
+    if ($tile->hasField('field_object_reference') && !$tile->get('field_object_reference')->isEmpty()) {
+      $obj = $tile->get('field_object_reference')->entity;
+      if ($obj) {
+        $target_id = (int) $obj->id();
+        $object_bundle = (string) $obj->bundle();
+        $object_title = (string) $obj->label();
+        $object_path = $this->aliasManager->getAliasByPath('/node/' . $obj->id());
+      }
+    }
+
+    $builder_type = 'custom_tile';
+    if ($display_mode === 'newsletter' || $object_bundle === 'newsletter_edition') {
+      $builder_type = 'newsletter';
+    }
+    elseif ($display_mode === 'song' || $object_bundle === 'song') {
+      $builder_type = 'song';
+    }
+    elseif ($display_mode === 'chat') {
+      $builder_type = 'chat';
+    }
+    elseif ($display_mode === 'gate' || $object_bundle === 'biome_gate') {
+      $builder_type = 'biome_gate';
+    }
+    elseif ($object_bundle === 'artist') {
+      $builder_type = 'artist';
+    }
+    elseif ($object_bundle === 'place') {
+      $builder_type = 'place';
+    }
+    elseif ($object_bundle === 'custom_tile') {
+      $builder_type = 'custom_tile';
+    }
+
+    $search_bundle = $object_bundle ?: ($builder_type === 'chat' ? 'custom_tile' : $builder_type);
+
+    $row = [
+      'key' => "{$tz}:{$tx}:{$ty}",
+      'builder_type' => $builder_type,
+      'search_bundle' => $search_bundle,
+      'title' => (string) $tile->label(),
+      'tile_key' => $tile_key,
+      'z' => $tz,
+      'x' => $tx,
+      'y' => $ty,
+      'w' => $tw,
+      'h' => $th,
+      'role' => $role,
+      'object_ref' => $target_id ? "node:{$target_id}" : '',
+      'target_id' => $target_id ?: '',
+      'object_title' => $object_title,
+      'object_path' => $object_path,
+      'bundle' => $object_bundle,
+      'tile_display_mode' => $display_mode,
+      'flippable' => $flippable ? 1 : 0,
+      'ddt' => $ddt ? 1 : 0,
+      'is_canonical' => $canonical ? 1 : 0,
+      'cms_status' => 'loaded',
+      'cms_action' => 'loaded',
+      'cms_tile_id' => (int) $tile->id(),
+      'cms_message' => 'Loaded existing tile',
+    ];
+
+    return new JsonResponse([
+      'ok' => true,
+      'found' => true,
+      'tile' => [
+        'id' => (int) $tile->id(),
+        'title' => (string) $tile->label(),
+        'url' => "/w/{$tz}/{$tx}/{$ty}",
+      ],
+      'row' => $row,
+    ], 200);
+  }
+
   public function saveTilePlacement(Request $request): JsonResponse {
     if ($request->getMethod() === 'OPTIONS') {
       return new JsonResponse(['ok' => true], 200);
