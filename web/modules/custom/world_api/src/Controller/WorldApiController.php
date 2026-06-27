@@ -702,6 +702,91 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     ], 200);
   }
 
+  public function deleteTilePlacement(Request $request): JsonResponse {
+    if ($request->getMethod() === 'OPTIONS') {
+      return new JsonResponse(['ok' => true], 200);
+    }
+
+    if ($deny = $this->requireBetaAccess()) {
+      return $deny;
+    }
+
+    $account = \Drupal::currentUser();
+    if (!in_array('administrator', $account->getRoles(), TRUE)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'builder_access_required',
+        'message' => 'Administrator access is required to delete world tiles.',
+      ], 403);
+    }
+
+    $payload = json_decode($request->getContent(), TRUE);
+    if (!is_array($payload)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'invalid_json',
+      ], 400);
+    }
+
+    $z = (int) ($payload['z'] ?? 10);
+    $x = (int) ($payload['x'] ?? -1);
+    $y = (int) ($payload['y'] ?? -1);
+
+    if ($z < 0 || $x < 0 || $y < 0 || $x > 1023 || $y > 1023) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'invalid_coordinates',
+        'message' => 'Expected z >= 0 and x/y between 0 and 1023.',
+      ], 400);
+    }
+
+    $storage = $this->entityTypeManager->getStorage('node');
+
+    $nids = $storage->getQuery()
+      ->accessCheck(TRUE)
+      ->condition('type', 'tile')
+      ->condition('field_z', $z)
+      ->condition('field_x', $x)
+      ->condition('field_y', $y)
+      ->range(0, 1)
+      ->execute();
+
+    if (!$nids) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'tile_not_found',
+        'message' => 'No tile exists at that coordinate.',
+        'z' => $z,
+        'x' => $x,
+        'y' => $y,
+      ], 404);
+    }
+
+    $tile = $storage->load(reset($nids));
+    if (!$tile) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'tile_not_found',
+      ], 404);
+    }
+
+    $deleted = [
+      'id' => (int) $tile->id(),
+      'title' => $tile->label(),
+      'z' => $z,
+      'x' => $x,
+      'y' => $y,
+    ];
+
+    $tile->delete();
+
+    return new JsonResponse([
+      'ok' => true,
+      'action' => 'deleted',
+      'tile' => $deleted,
+    ], 200);
+  }
+
   public function saveTilePlacement(Request $request): JsonResponse {
     if ($request->getMethod() === 'OPTIONS') {
       return new JsonResponse(['ok' => true], 200);
