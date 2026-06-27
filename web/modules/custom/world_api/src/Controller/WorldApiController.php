@@ -702,6 +702,91 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     ], 200);
   }
 
+  public function objectSearch(Request $request): JsonResponse {
+    if ($deny = $this->requireBetaAccess()) {
+      return $deny;
+    }
+
+    $allowed_bundles = [
+      'song',
+      'artist',
+      'newsletter_edition',
+      'place',
+      'custom_tile',
+      'biome_gate',
+      'menu_object',
+    ];
+
+    $bundle = trim((string) $request->query->get('bundle', 'song'));
+    $q = trim((string) $request->query->get('q', ''));
+    $limit = (int) $request->query->get('limit', 12);
+    $limit = max(1, min(25, $limit));
+
+    if (!in_array($bundle, $allowed_bundles, TRUE)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'invalid_bundle',
+        'allowed_bundles' => $allowed_bundles,
+      ], 400);
+    }
+
+    if ($q === '') {
+      return new JsonResponse([
+        'ok' => true,
+        'bundle' => $bundle,
+        'q' => $q,
+        'results' => [],
+      ], 200);
+    }
+
+    $storage = $this->entityTypeManager->getStorage('node');
+
+    $query = $storage->getQuery()
+      ->accessCheck(TRUE)
+      ->condition('type', $bundle)
+      ->condition('status', 1)
+      ->range(0, $limit)
+      ->sort('changed', 'DESC');
+
+    if (ctype_digit($q)) {
+      $query->condition('nid', (int) $q);
+    }
+    else {
+      $query->condition('title', $q, 'CONTAINS');
+    }
+
+    $nids = $query->execute();
+
+    if (!$nids) {
+      return new JsonResponse([
+        'ok' => true,
+        'bundle' => $bundle,
+        'q' => $q,
+        'results' => [],
+      ], 200);
+    }
+
+    $nodes = $storage->loadMultiple($nids);
+    $results = [];
+
+    foreach ($nodes as $node) {
+      $results[] = [
+        'id' => (int) $node->id(),
+        'nid' => (int) $node->id(),
+        'bundle' => (string) $node->bundle(),
+        'title' => (string) $node->label(),
+        'path' => $this->aliasManager->getAliasByPath('/node/' . $node->id()),
+      ];
+    }
+
+    return new JsonResponse([
+      'ok' => true,
+      'bundle' => $bundle,
+      'q' => $q,
+      'results' => $results,
+    ], 200);
+  }
+
   private function requireBetaAccess(): ?JsonResponse {
     $account = \Drupal::currentUser();
 

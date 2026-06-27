@@ -56,3 +56,11 @@ world_api.newsletter:
     _permission: 'access content'
   methods: [GET, OPTIONS]
 
+world_api.object_search:
+  path: '/api/world/object-search'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\WorldApiController::objectSearch'
+  requirements:
+    _permission: 'access content'
+  methods: [GET, OPTIONS]
+
