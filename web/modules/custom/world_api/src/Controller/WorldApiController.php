@@ -702,6 +702,103 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
     ], 200);
   }
 
+
+  public function rebuildStaticPlates(Request $request): JsonResponse {
+    if ($request->getMethod() === 'OPTIONS') {
+      return new JsonResponse(['ok' => true], 200);
+    }
+
+    if ($deny = $this->requireBetaAccess()) {
+      return $deny;
+    }
+
+    $account = \Drupal::currentUser();
+    if (!in_array('administrator', $account->getRoles(), TRUE)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'builder_access_required',
+        'message' => 'Administrator access is required to rebuild world plates.',
+      ], 403);
+    }
+
+    $payload = json_decode($request->getContent(), TRUE);
+    if (!is_array($payload)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'invalid_json',
+      ], 400);
+    }
+
+    $tiles = $this->normalizePlateRebuildTiles($payload['tiles'] ?? $payload['changed_tiles'] ?? []);
+    if (!$tiles) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'missing_tiles',
+        'message' => 'Expected one or more changed tile coordinates.',
+      ], 400);
+    }
+
+    $cookie = trim((string) $request->headers->get('Cookie', ''));
+    if ($cookie === '') {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'missing_session_cookie',
+        'message' => 'Could not forward the current session cookie to the plate rebuild process.',
+      ], 400);
+    }
+
+    $workdir = '/var/www/ewrm-build/ewrm-world';
+    $script = $workdir . '/scripts/rebuild-static-plates-for-tiles.mjs';
+    $manifest = $workdir . '/public/plates/z10/manifest.json';
+
+    if (!is_dir($workdir) || !is_file($script)) {
+      return new JsonResponse([
+        'ok' => false,
+        'error' => 'plate_rebuild_not_configured',
+        'message' => 'Plate rebuild source checkout is not available on the server.',
+        'workdir' => $workdir,
+      ], 500);
+    }
+
+    $tiles_arg = implode(';', array_map(
+      static fn(array $tile): string => $tile['x'] . ',' . $tile['y'],
+      $tiles
+    ));
+
+    $command = [
+      '/usr/bin/npm',
+      'run',
+      'generate:static-plates:webp:changed',
+      '--',
+      '--tiles=' . $tiles_arg,
+      '--api-base=https://ewrm.com',
+    ];
+
+    $started = microtime(TRUE);
+    $result = $this->runPlateRebuildCommand($command, $workdir, [
+      'EWRM_API_COOKIE' => $cookie,
+      'PATH' => '/usr/local/bin:/usr/bin:/bin',
+      'HOME' => '/home/deploy',
+    ], 180);
+
+    $duration_ms = (int) round((microtime(TRUE) - $started) * 1000);
+    $ok = ($result['exit_code'] === 0);
+
+    return new JsonResponse([
+      'ok' => $ok,
+      'tiles' => $tiles,
+      'tile_count' => count($tiles),
+      'duration_ms' => $duration_ms,
+      'exit_code' => $result['exit_code'],
+      'stdout' => $this->tailString($result['stdout'], 6000),
+      'stderr' => $this->tailString($result['stderr'], 6000),
+      'manifest_updated' => is_file($manifest),
+      'message' => $ok
+        ? 'Static plates rebuilt for the changed tiles.'
+        : 'Static plate rebuild failed. Use the copied command fallback or check server logs.',
+    ], $ok ? 200 : 500);
+  }
+
   public function deleteTilePlacement(Request $request): JsonResponse {
     if ($request->getMethod() === 'OPTIONS') {
       return new JsonResponse(['ok' => true], 200);
@@ -1914,6 +2011,133 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
 
     // Fallback: return as-is (still useful for debugging).
     return $uri;
+  }
+
+
+  private function normalizePlateRebuildTiles(mixed $raw): array {
+    if (!is_array($raw)) {
+      return [];
+    }
+
+    $by_key = [];
+    foreach ($raw as $item) {
+      if (!is_array($item)) {
+        continue;
+      }
+
+      $z = $this->safeIntValue($item['z'] ?? 10, 10);
+      $x = $this->safeIntValue($item['x'] ?? null, -1);
+      $y = $this->safeIntValue($item['y'] ?? null, -1);
+
+      if ($z < 0 || $x < 0 || $y < 0 || $x > 1023 || $y > 1023) {
+        continue;
+      }
+
+      $key = "{$z}:{$x}:{$y}";
+      $by_key[$key] = [
+        'z' => $z,
+        'x' => $x,
+        'y' => $y,
+      ];
+    }
+
+    $tiles = array_values($by_key);
+    usort($tiles, static fn(array $a, array $b): int =>
+      ($a['y'] <=> $b['y']) ?: ($a['x'] <=> $b['x']) ?: ($a['z'] <=> $b['z'])
+    );
+
+    return $tiles;
+  }
+
+  private function safeIntValue(mixed $value, int $default): int {
+    if ($value === null || $value === '') {
+      return $default;
+    }
+
+    if (is_int($value)) {
+      return $value;
+    }
+
+    $string = trim((string) $value);
+    if (!preg_match('/^-?\d+$/', $string)) {
+      return $default;
+    }
+
+    return (int) $string;
+  }
+
+  private function runPlateRebuildCommand(array $command, string $cwd, array $env, int $timeoutSeconds): array {
+    $descriptors = [
+      0 => ['pipe', 'r'],
+      1 => ['pipe', 'w'],
+      2 => ['pipe', 'w'],
+    ];
+
+    $process = @proc_open($command, $descriptors, $pipes, $cwd, $env, ['bypass_shell' => TRUE]);
+    if (!is_resource($process)) {
+      return [
+        'exit_code' => 127,
+        'stdout' => '',
+        'stderr' => 'Could not start plate rebuild process.',
+      ];
+    }
+
+    fclose($pipes[0]);
+    stream_set_blocking($pipes[1], FALSE);
+    stream_set_blocking($pipes[2], FALSE);
+
+    $stdout = '';
+    $stderr = '';
+    $deadline = microtime(TRUE) + $timeoutSeconds;
+    $timed_out = FALSE;
+
+    while (TRUE) {
+      $stdout .= stream_get_contents($pipes[1]);
+      $stderr .= stream_get_contents($pipes[2]);
+
+      $status = proc_get_status($process);
+      if (empty($status['running'])) {
+        break;
+      }
+
+      if (microtime(TRUE) >= $deadline) {
+        $timed_out = TRUE;
+        proc_terminate($process, 15);
+        usleep(250000);
+        $status = proc_get_status($process);
+        if (!empty($status['running'])) {
+          proc_terminate($process, 9);
+        }
+        break;
+      }
+
+      usleep(100000);
+    }
+
+    $stdout .= stream_get_contents($pipes[1]);
+    $stderr .= stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+
+    $exit_code = proc_close($process);
+    if ($timed_out) {
+      $exit_code = 124;
+      $stderr .= "\nPlate rebuild process timed out after {$timeoutSeconds} seconds.";
+    }
+
+    return [
+      'exit_code' => $exit_code,
+      'stdout' => $stdout,
+      'stderr' => $stderr,
+    ];
+  }
+
+  private function tailString(string $value, int $maxBytes): string {
+    if (strlen($value) <= $maxBytes) {
+      return $value;
+    }
+
+    return '…' . substr($value, -$maxBytes);
   }
 
   // ----------------------------

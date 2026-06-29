@@ -88,3 +88,11 @@ world_api.tile_placement_load:
     _permission: 'access content'
   methods: [GET, OPTIONS]
 
+world_api.plates_rebuild:
+  path: '/api/world/plates/rebuild'
+  defaults:
+    _controller: '\Drupal\world_api\Controller\WorldApiController::rebuildStaticPlates'
+  requirements:
+    _permission: 'access content'
+  methods: [POST, OPTIONS]
+
