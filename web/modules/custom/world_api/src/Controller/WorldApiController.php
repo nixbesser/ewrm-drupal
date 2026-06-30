@@ -1242,6 +1242,10 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
 
     $storage = $this->entityTypeManager->getStorage('node');
 
+    // Move/edit safety: when the editor sends cms_tile_id/tile_id, update that exact tile node.
+    // This prevents a coordinate change from creating a duplicate tile at the new location.
+    $requested_tile_id = (int) ($payload['tile_id'] ?? $payload['cms_tile_id'] ?? 0);
+
     $target_node = null;
     if ($target_id) {
       $target_node = $storage->load($target_id);
@@ -1274,25 +1278,78 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
       $title = "{$builder_type} {$target_label} @ {$z}:{$x}:{$y}";
     }
 
-    $existing = $storage->getQuery()
-      ->accessCheck(TRUE)
-      ->condition('type', 'tile')
-      ->condition('field_z', $z)
-      ->condition('field_x', $x)
-      ->condition('field_y', $y)
-      ->range(0, 1)
-      ->execute();
+    $source_tile = NULL;
+    $source_z = NULL;
+    $source_x = NULL;
+    $source_y = NULL;
+    $source_role = NULL;
 
     $action = 'created';
-    if ($existing) {
-      $tile = $storage->load(reset($existing));
-      $action = 'updated';
+
+    if ($requested_tile_id > 0) {
+      $tile = $storage->load($requested_tile_id);
+      if (!$tile || $tile->bundle() !== 'tile') {
+        return new JsonResponse([
+          'ok' => false,
+          'error' => 'tile_not_found',
+          'message' => 'The tile being edited no longer exists.',
+          'tile_id' => $requested_tile_id,
+        ], 404);
+      }
+
+      $source_tile = $tile;
+      $source_z = $tile->hasField('field_z') ? (int) ($tile->get('field_z')->value ?? $z) : $z;
+      $source_x = $tile->hasField('field_x') ? (int) ($tile->get('field_x')->value ?? $x) : $x;
+      $source_y = $tile->hasField('field_y') ? (int) ($tile->get('field_y')->value ?? $y) : $y;
+      $source_role = $tile->hasField('field_role') ? (string) ($tile->get('field_role')->value ?? '') : '';
+
+      $destination = $storage->getQuery()
+        ->accessCheck(TRUE)
+        ->condition('type', 'tile')
+        ->condition('field_z', $z)
+        ->condition('field_x', $x)
+        ->condition('field_y', $y)
+        ->range(0, 1)
+        ->execute();
+
+      if ($destination) {
+        $destination_id = (int) reset($destination);
+        if ($destination_id !== (int) $tile->id()) {
+          return new JsonResponse([
+            'ok' => false,
+            'error' => 'destination_occupied',
+            'message' => 'Another tile already exists at the requested destination.',
+            'tile_id' => (int) $tile->id(),
+            'destination_tile_id' => $destination_id,
+            'z' => $z,
+            'x' => $x,
+            'y' => $y,
+          ], 409);
+        }
+      }
+
+      $action = ($source_z !== $z || $source_x !== $x || $source_y !== $y) ? 'moved' : 'updated';
     }
     else {
-      $tile = $storage->create([
-        'type' => 'tile',
-        'status' => 1,
-      ]);
+      $existing = $storage->getQuery()
+        ->accessCheck(TRUE)
+        ->condition('type', 'tile')
+        ->condition('field_z', $z)
+        ->condition('field_x', $x)
+        ->condition('field_y', $y)
+        ->range(0, 1)
+        ->execute();
+
+      if ($existing) {
+        $tile = $storage->load(reset($existing));
+        $action = 'updated';
+      }
+      else {
+        $tile = $storage->create([
+          'type' => 'tile',
+          'status' => 1,
+        ]);
+      }
     }
 
     $tile->setTitle($title);
@@ -1323,15 +1380,26 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
 
     $tile->save();
 
-    $changed_tiles = in_array($role, ['road', 'ybr', 'plaza'], TRUE)
-      ? [[
+    $changed_tiles = [];
+    if (in_array($role, ['road', 'ybr', 'plaza'], TRUE)) {
+      if ($action === 'moved' && $source_z !== NULL && $source_x !== NULL && $source_y !== NULL) {
+        $changed_tiles[] = [
+          'z' => $source_z,
+          'x' => $source_x,
+          'y' => $source_y,
+          'role' => $source_role ?: $role,
+          'action' => 'moved_from',
+        ];
+      }
+
+      $changed_tiles[] = [
         'z' => $z,
         'x' => $x,
         'y' => $y,
         'role' => $role,
         'action' => $action,
-      ]]
-      : [];
+      ];
+    }
 
     return new JsonResponse([
       'ok' => true,
@@ -1350,6 +1418,12 @@ $ddt = ($role === 'road' || $role === 'ybr') || $this->readBoolField($anchor, 'f
         'tile_display_mode' => $display_mode,
         'url' => "/w/{$z}/{$x}/{$y}",
       ],
+      'source' => $source_tile ? [
+        'z' => $source_z,
+        'x' => $source_x,
+        'y' => $source_y,
+        'role' => $source_role,
+      ] : null,
       'changed_tiles' => $changed_tiles,
       'plate_rebuild_required' => !empty($changed_tiles),
     ], 200);
